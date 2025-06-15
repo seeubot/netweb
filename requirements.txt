@@ -1,0 +1,6 @@
+pyrogram
+tgcrypto
+aiohttp
+beautifulsoup4
+flask
+lxml
