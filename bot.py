@@ -10,7 +10,7 @@ API_ID = 23054736
 API_HASH = "d538c2e1a687d414f5c3dce7bf4a743c"
 BOT_TOKEN = "6578034792:AAGbSGcWlxg1jUT73WYS_xpdAJsYy0Rrk0A"
 ADMIN_ID = 1352497419
-CHANNEL_ID = "1352497419"
+CHANNEL_ID = "seeu_bin"
 
 app = Client("mega_nsfw", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 flask_app = Flask(__name__)
@@ -39,6 +39,18 @@ async def fetch_videos(query, site="pornhub", limit=5):
         url = f"https://xhamster.com/search/{query}"
         selector = ".thumb-list__item"
         base = "https://xhamster.com"
+    elif site == "redtube":
+        url = f"https://www.redtube.com/?search={query}"
+        selector = ".thumb-block"
+        base = "https://www.redtube.com"
+    elif site == "youporn":
+        url = f"https://www.youporn.com/search/?query={query}"
+        selector = ".video-box"
+        base = "https://www.youporn.com"
+    elif site == "spankbang":
+        url = f"https://www.spankbang.com/search/{query}"
+        selector = ".video-item"
+        base = "https://www.spankbang.com"
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -63,6 +75,24 @@ async def fetch_videos(query, site="pornhub", limit=5):
                     a = item.find("a")
                     title = a.img["alt"]
                     link = a["href"]
+                    thumb = a.img["src"]
+                    duration = "N/A"
+                elif site == "redtube":
+                    a = item.find("a")
+                    title = a["title"]
+                    link = base + a["href"]
+                    thumb = a.img["src"]
+                    duration = "N/A"
+                elif site == "youporn":
+                    a = item.find("a")
+                    title = a["title"]
+                    link = base + a["href"]
+                    thumb = a.img["src"]
+                    duration = "N/A"
+                elif site == "spankbang":
+                    a = item.find("a")
+                    title = a["title"]
+                    link = base + a["href"]
                     thumb = a.img["src"]
                     duration = "N/A"
                 result.append({
@@ -96,7 +126,7 @@ async def start(client, msg: Message):
     user_keywords[msg.from_user.id] = "trending"
     await msg.reply(
         "🔥 **Welcome to Mega NSFW Bot!**\n\n"
-        "Type any keyword to search videos from Pornhub, XNXX, XHamster.\n"
+        "Type any keyword to search videos from Pornhub, XNXX, XHamster, RedTube, YouPorn, SpankBang.\n"
         "Use /help to see available commands.",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🔥 Trending", callback_data="trending"),
@@ -138,7 +168,8 @@ async def search_handler(client, msg):
     query = msg.text.strip()
     uid = msg.from_user.id
     user_keywords[uid] = query
-    for site in ["pornhub", "xnxx", "xhamster"]:
+    sites = ["pornhub", "xnxx", "xhamster", "redtube", "youporn", "spankbang"]
+    for site in sites:
         await msg.reply(f"🔍 Searching `{query}` on **{site.upper()}**...")
         videos = await fetch_videos(query, site)
         if not videos:
