@@ -5,6 +5,7 @@ from flask import Flask
 from bs4 import BeautifulSoup
 from datetime import datetime
 import pyperclip
+import requests
 
 # ----------------------- Config -----------------------
 API_ID = 23054736
@@ -112,7 +113,7 @@ async def fetch_videos(query, site="pornhub", limit=5):
 
 # ----------------------- Button UI -----------------------
 def video_buttons(url, fav=False):
-    short_url = pyperclip.paste()  # Assume the shortened URL is in the clipboard
+    short_url = shorten_url(url)
     buttons = [
         [InlineKeyboardButton("▶️ Watch", url=short_url)],
         [InlineKeyboardButton("🎯 Suggest More", callback_data="suggest")],
@@ -121,6 +122,16 @@ def video_buttons(url, fav=False):
     if fav:
         buttons.append([InlineKeyboardButton("❤️ Add to Favorites", callback_data=f"fav_{short_url}")])
     return InlineKeyboardMarkup(buttons)
+
+def shorten_url(long_url):
+    api_url = "http://tinyurl.com/api-create.php?url=" + long_url
+    response = requests.get(api_url)
+    if response.status_code == 200:
+        short_url = response.text
+        pyperclip.copy(short_url)  # Copy to clipboard
+        return short_url
+    else:
+        return long_url
 
 # ----------------------- Bot Commands -----------------------
 @app.on_message(filters.command("start"))
@@ -179,8 +190,7 @@ async def search_handler(client, msg):
             continue
         for vid in videos:
             caption = f"🎬 **{vid['title']}**\n⏱ {vid['duration']} | 🌐 {vid['site']}"
-            # Shorten the URL before passing it to the button
-            short_url = pyperclip.paste()  # Assume the shortened URL is in the clipboard
+            short_url = shorten_url(vid["url"])
             await msg.reply_photo(photo=vid["thumb"], caption=caption,
                                   reply_markup=video_buttons(short_url, fav=True))
 
