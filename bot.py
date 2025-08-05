@@ -4,6 +4,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from flask import Flask
 from bs4 import BeautifulSoup
 from datetime import datetime
+import pyperclip
 
 # ----------------------- Config -----------------------
 API_ID = 23054736
@@ -111,13 +112,14 @@ async def fetch_videos(query, site="pornhub", limit=5):
 
 # ----------------------- Button UI -----------------------
 def video_buttons(url, fav=False):
+    short_url = pyperclip.paste()  # Assume the shortened URL is in the clipboard
     buttons = [
-        [InlineKeyboardButton("▶️ Watch", url=url)],
+        [InlineKeyboardButton("▶️ Watch", url=short_url)],
         [InlineKeyboardButton("🎯 Suggest More", callback_data="suggest")],
-        [InlineKeyboardButton("📥 Download", url=url)]
+        [InlineKeyboardButton("📥 Download", url=short_url)]
     ]
     if fav:
-        buttons.append([InlineKeyboardButton("❤️ Add to Favorites", callback_data=f"fav_{url}")])
+        buttons.append([InlineKeyboardButton("❤️ Add to Favorites", callback_data=f"fav_{short_url}")])
     return InlineKeyboardMarkup(buttons)
 
 # ----------------------- Bot Commands -----------------------
@@ -177,8 +179,10 @@ async def search_handler(client, msg):
             continue
         for vid in videos:
             caption = f"🎬 **{vid['title']}**\n⏱ {vid['duration']} | 🌐 {vid['site']}"
+            # Shorten the URL before passing it to the button
+            short_url = pyperclip.paste()  # Assume the shortened URL is in the clipboard
             await msg.reply_photo(photo=vid["thumb"], caption=caption,
-                                  reply_markup=video_buttons(vid["url"], fav=True))
+                                  reply_markup=video_buttons(short_url, fav=True))
 
 # ----------------------- Callback Handler -----------------------
 @app.on_callback_query()
