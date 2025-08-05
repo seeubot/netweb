@@ -4,3 +4,5 @@ aiohttp
 beautifulsoup4
 flask
 lxml
+pyperclip
+requests
