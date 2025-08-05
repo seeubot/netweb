@@ -61,39 +61,39 @@ async def fetch_videos(query, site="pornhub", limit=5):
         for item in videos[:limit]:
             try:
                 if site == "pornhub":
-                    title = item["data-title"]
-                    link = base + item["href"]
-                    thumb = item["data-thumb_url"]
-                    duration = item.select_one(".duration").text.strip()
+                    title = item.get("data-title", "N/A")
+                    link = base + item.get("href", "")
+                    thumb = item.get("data-thumb_url", "")
+                    duration = item.select_one(".duration").text.strip() if item.select_one(".duration") else "N/A"
                 elif site == "xnxx":
                     a = item.find("a")
-                    title = a["title"]
-                    link = base + a["href"]
-                    thumb = a.img.get("data-src", a.img["src"])
+                    title = a.get("title", "N/A")
+                    link = base + a.get("href", "")
+                    thumb = a.img.get("data-src", a.img.get("src", ""))
                     duration = "N/A"
                 elif site == "xhamster":
                     a = item.find("a")
-                    title = a.img["alt"]
-                    link = a["href"]
-                    thumb = a.img["src"]
+                    title = a.img.get("alt", "N/A")
+                    link = a.get("href", "")
+                    thumb = a.img.get("src", "")
                     duration = "N/A"
                 elif site == "redtube":
                     a = item.find("a")
-                    title = a["title"]
-                    link = base + a["href"]
-                    thumb = a.img["src"]
+                    title = a.get("title", "N/A")
+                    link = base + a.get("href", "")
+                    thumb = a.img.get("src", "")
                     duration = "N/A"
                 elif site == "youporn":
                     a = item.find("a")
-                    title = a["title"]
-                    link = base + a["href"]
-                    thumb = a.img["src"]
+                    title = a.get("title", "N/A")
+                    link = base + a.get("href", "")
+                    thumb = a.img.get("src", "")
                     duration = "N/A"
                 elif site == "spankbang":
                     a = item.find("a")
-                    title = a["title"]
-                    link = base + a["href"]
-                    thumb = a.img["src"]
+                    title = a.get("title", "N/A")
+                    link = base + a.get("href", "")
+                    thumb = a.img.get("src", "")
                     duration = "N/A"
                 result.append({
                     "title": title,
