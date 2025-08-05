@@ -6,11 +6,11 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 
 # ----------------------- Config -----------------------
-API_ID = 26649585
-API_HASH = "588a3ea6fd01ae88bd2e10fed7d55b2c"
-BOT_TOKEN = "7669234075:AAHU3BZ0sjUPnn9aFw_jBg9CFNnyfYlDH9Y"
-ADMIN_ID = 7822720438
-CHANNEL_ID = "7030759377"
+API_ID = 23054736
+API_HASH = "d538c2e1a687d414f5c3dce7bf4a743c"
+BOT_TOKEN = "6578034792:AAGbSGcWlxg1jUT73WYS_xpdAJsYy0Rrk0A"
+ADMIN_ID = 1352497419
+CHANNEL_ID = "1352497419"
 
 app = Client("mega_nsfw", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 flask_app = Flask(__name__)
