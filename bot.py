@@ -386,7 +386,44 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         await query.edit_message_text(welcome_message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
 
-async def handle_broadcast_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def upload_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Check if update.message exists
+    if not update.message:
+        logger.error("No message in update")
+        return
+    
+    user_id = update.message.from_user.id
+    
+    # Check if admin is in broadcast mode
+    if ADMIN_ID and user_id == ADMIN_ID:
+        if context.user_data.get('broadcast_mode') or context.user_data.get('trending_mode'):
+            await handle_broadcast_content(update, context)
+            return
+    
+    if 'users' not in context.bot_data:
+        context.bot_data['users'] = {}
+    
+    if user_id not in context.bot_data['users']:
+        context.bot_data['users'][user_id] = {'uploaded_videos': 0}
+    
+    user_data = context.bot_data['users'][user_id]
+
+    video = update.message.video
+    if video:
+        # Store video file ID (no forwarding to channels)
+        video_storage.append(video.file_id)
+        
+        user_data['uploaded_videos'] = user_data.get('uploaded_videos', 0) + 1
+
+        await update.message.reply_text(
+            f"✅ Video uploaded successfully!\n"
+            f"📊 Total videos uploaded: {user_data['uploaded_videos']}\n"
+            f"📹 Total videos in collection: {len(video_storage)}"
+        )
+        
+        logger.info(f"User {user_id} uploaded a video. Total videos: {len(video_storage)}")
+    else:
+        await update.message.reply_text("❌ Please send a valid video file.")
     """Handle broadcast content from admin"""
     if not ADMIN_ID or update.message.from_user.id != ADMIN_ID:
         return
