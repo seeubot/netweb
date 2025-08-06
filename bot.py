@@ -771,4 +771,53 @@ def main() -> None:
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == '__main__':
+    main()text += f"📹 Videos watched today: {daily_count}/{DAILY_LIMIT}\n"
+        stats_text += f"⏳ Remaining today: {remaining}\n"
+        stats_text += f"📤 Videos uploaded: {uploaded_videos}"
+        
+        await update.message.reply_text(stats_text, parse_mode=ParseMode.MARKDOWN)
+    else:
+        # Show admin stats
+        total_users = len(context.bot_data.get('users', {}))
+        total_videos = len(video_storage)
+        
+        trending_count = 0
+        if os.path.exists('trending_videos.txt'):
+            with open('trending_videos.txt', 'r') as file:
+                trending_count = len([line for line in file.readlines() if line.strip()])
+        
+        stats_text = f"📊 Bot Statistics:\n"
+        stats_text += f"👥 Total users: {total_users}\n"
+        stats_text += f"📹 Total videos: {total_videos}\n"
+        stats_text += f"🔥 Trending videos: {trending_count}\n"
+        stats_text += f"⚙️ Daily limit: {DAILY_LIMIT}"
+        
+        await update.message.reply_text(stats_text)
+
+def main() -> None:
+    if not API_TOKEN:
+        logger.error("TELEGRAM_API_TOKEN not found in environment variables")
+        return
+    
+    application = Application.builder().token(API_TOKEN).build()
+
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(CommandHandler("cancel", cancel_operation))
+    application.add_handler(CallbackQueryHandler(button))
+    application.add_handler(MessageHandler(filters.VIDEO, upload_video))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    application.add_handler(CommandHandler("broadcast", broadcast))  # Keep old broadcast command as backup
+    application.add_handler(CommandHandler("trending", trending))
+
+    # Schedule cleanup job to run every hour
+    application.job_queue.run_repeating(cleanup_old_messages, interval=3600, first=3600)
+
+    # Run the bot in polling mode
+    logger.info("Starting bot in polling mode...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+
+if __name__ == '__main__':
     main()
