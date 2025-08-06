@@ -386,44 +386,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         await query.edit_message_text(welcome_message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
 
-async def upload_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Check if update.message exists
-    if not update.message:
-        logger.error("No message in update")
-        return
-    
-    user_id = update.message.from_user.id
-    
-    # Check if admin is in broadcast mode
-    if ADMIN_ID and user_id == ADMIN_ID:
-        if context.user_data.get('broadcast_mode') or context.user_data.get('trending_mode'):
-            await handle_broadcast_content(update, context)
-            return
-    
-    if 'users' not in context.bot_data:
-        context.bot_data['users'] = {}
-    
-    if user_id not in context.bot_data['users']:
-        context.bot_data['users'][user_id] = {'uploaded_videos': 0}
-    
-    user_data = context.bot_data['users'][user_id]
-
-    video = update.message.video
-    if video:
-        # Store video file ID (no forwarding to channels)
-        video_storage.append(video.file_id)
-        
-        user_data['uploaded_videos'] = user_data.get('uploaded_videos', 0) + 1
-
-        await update.message.reply_text(
-            f"✅ Video uploaded successfully!\n"
-            f"📊 Total videos uploaded: {user_data['uploaded_videos']}\n"
-            f"📹 Total videos in collection: {len(video_storage)}"
-        )
-        
-        logger.info(f"User {user_id} uploaded a video. Total videos: {len(video_storage)}")
-    else:
-        await update.message.reply_text("❌ Please send a valid video file.")
+async def handle_broadcast_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle broadcast content from admin"""
     if not ADMIN_ID or update.message.from_user.id != ADMIN_ID:
         return
@@ -557,27 +520,19 @@ async def upload_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             f"An error occurred during broadcast: {str(e)}"
         )
 
-async def cancel_operation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Cancel any ongoing admin operation"""
-    if not ADMIN_ID or update.message.from_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Only admin can use this command.")
-        return
-    
-    # Clear any ongoing operations
-    context.user_data.pop('broadcast_mode', None)
-    context.user_data.pop('trending_mode', None)
-    
-    await update.message.reply_text(
-        "✅ **Operation Cancelled**\n\n"
-        "All ongoing operations have been cancelled.\n"
-        "Use /start to return to the main menu."
-    )
+async def upload_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Check if update.message exists
     if not update.message:
         logger.error("No message in update")
         return
-        
+    
     user_id = update.message.from_user.id
+    
+    # Check if admin is in broadcast mode
+    if ADMIN_ID and user_id == ADMIN_ID:
+        if context.user_data.get('broadcast_mode') or context.user_data.get('trending_mode'):
+            await handle_broadcast_content(update, context)
+            return
     
     if 'users' not in context.bot_data:
         context.bot_data['users'] = {}
@@ -603,6 +558,38 @@ async def cancel_operation(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         logger.info(f"User {user_id} uploaded a video. Total videos: {len(video_storage)}")
     else:
         await update.message.reply_text("❌ Please send a valid video file.")
+
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle text messages (for broadcast mode)"""
+    if not update.message:
+        return
+    
+    user_id = update.message.from_user.id
+    
+    # Check if admin is in broadcast mode
+    if ADMIN_ID and user_id == ADMIN_ID:
+        if context.user_data.get('broadcast_mode') == 'text':
+            await handle_broadcast_content(update, context)
+            return
+    
+    # For regular users, you might want to add other text handling here
+    # For now, we'll just ignore regular text messages
+
+async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle photo messages (for broadcast mode)"""
+    if not update.message:
+        return
+    
+    user_id = update.message.from_user.id
+    
+    # Check if admin is in broadcast mode
+    if ADMIN_ID and user_id == ADMIN_ID:
+        if context.user_data.get('broadcast_mode') == 'image':
+            await handle_broadcast_content(update, context)
+            return
+    
+    # For regular users, you might want to handle photo uploads here
+    await update.message.reply_text("📷 Photo received! Currently, only video uploads are supported for the collection.")
 
 async def delete_message(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Delete a message after the specified time"""
@@ -639,8 +626,24 @@ async def cleanup_old_messages(context: ContextTypes.DEFAULT_TYPE) -> None:
     for msg_info in messages_to_remove:
         sent_messages.remove(msg_info)
 
+async def cancel_operation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Cancel any ongoing admin operation"""
+    if not ADMIN_ID or update.message.from_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Only admin can use this command.")
+        return
+    
+    # Clear any ongoing operations
+    context.user_data.pop('broadcast_mode', None)
+    context.user_data.pop('trending_mode', None)
+    
+    await update.message.reply_text(
+        "✅ **Operation Cancelled**\n\n"
+        "All ongoing operations have been cancelled.\n"
+        "Use /start to return to the main menu."
+    )
+
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin only: broadcast message to all users"""
+    """Admin only: broadcast message to all users (legacy command)"""
     if not ADMIN_ID or update.message.from_user.id != ADMIN_ID:
         await update.message.reply_text("❌ Only admin can use this command.")
         return
@@ -690,7 +693,7 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 async def trending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin only: mark video as trending"""
+    """Admin only: mark video as trending (legacy command)"""
     if not ADMIN_ID or update.message.from_user.id != ADMIN_ID:
         await update.message.reply_text("❌ Only admin can use this command.")
         return
@@ -720,58 +723,20 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         uploaded_videos = user_data.get('uploaded_videos', 0)
         remaining = max(0, DAILY_LIMIT - daily_count)
         
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show bot statistics"""
+    if not ADMIN_ID or update.message.from_user.id != ADMIN_ID:
+        # Show user stats
+        user_id = update.message.from_user.id
+        user_data = context.bot_data.get('users', {}).get(user_id, {})
+        
+        daily_count = user_data.get('daily_count', 0)
+        uploaded_videos = user_data.get('uploaded_videos', 0)
+        remaining = max(0, DAILY_LIMIT - daily_count)
+        
         stats_text = f"📊 Your Stats:\n"
         stats_text += f"🆔 User ID: `{user_id}`\n"
         stats_text += f"📹 Videos watched today: {daily_count}/{DAILY_LIMIT}\n"
-        stats_text += f"⏳ Remaining today: {remaining}\n"
-        stats_text += f"📤 Videos uploaded: {uploaded_videos}"
-        
-        await update.message.reply_text(stats_text, parse_mode=ParseMode.MARKDOWN)
-    else:
-        # Show admin stats
-        total_users = len(context.bot_data.get('users', {}))
-        total_videos = len(video_storage)
-        
-        trending_count = 0
-        if os.path.exists('trending_videos.txt'):
-            with open('trending_videos.txt', 'r') as file:
-                trending_count = len([line for line in file.readlines() if line.strip()])
-        
-        stats_text = f"📊 Bot Statistics:\n"
-        stats_text += f"👥 Total users: {total_users}\n"
-        stats_text += f"📹 Total videos: {total_videos}\n"
-        stats_text += f"🔥 Trending videos: {trending_count}\n"
-        stats_text += f"⚙️ Daily limit: {DAILY_LIMIT}"
-        
-        await update.message.reply_text(stats_text)
-
-def main() -> None:
-    if not API_TOKEN:
-        logger.error("TELEGRAM_API_TOKEN not found in environment variables")
-        return
-    
-    application = Application.builder().token(API_TOKEN).build()
-
-    # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("stats", stats))
-    application.add_handler(CommandHandler("cancel", cancel_operation))
-    application.add_handler(CallbackQueryHandler(button))
-    application.add_handler(MessageHandler(filters.VIDEO, upload_video))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
-    application.add_handler(CommandHandler("broadcast", broadcast))  # Keep old broadcast command as backup
-    application.add_handler(CommandHandler("trending", trending))
-
-    # Schedule cleanup job to run every hour
-    application.job_queue.run_repeating(cleanup_old_messages, interval=3600, first=3600)
-
-    # Run the bot in polling mode
-    logger.info("Starting bot in polling mode...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-
-if __name__ == '__main__':
-    main()text += f"📹 Videos watched today: {daily_count}/{DAILY_LIMIT}\n"
         stats_text += f"⏳ Remaining today: {remaining}\n"
         stats_text += f"📤 Videos uploaded: {uploaded_videos}"
         
