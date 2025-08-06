@@ -22,9 +22,14 @@ logger = logging.getLogger(__name__)
 
 # Load environment variables
 API_TOKEN = os.getenv('TELEGRAM_API_TOKEN')
-SOURCE_CHANNEL = os.getenv('SOURCE_CHANNEL')  # Channel to fetch videos from
+SOURCE_CHANNEL = os.getenv('SOURCE_CHANNEL')  # Channel to fetch videos from and broadcast to
 ADMIN_ID = int(os.getenv('ADMIN_ID')) if os.getenv('ADMIN_ID') else None
 DAILY_LIMIT = int(os.getenv('DAILY_LIMIT', 5))
+
+# Webhook configuration for Koyeb
+WEBHOOK_URL = os.getenv('WEBHOOK_URL') # Koyeb will provide this as an environment variable
+PORT = int(os.getenv('PORT', 8000)) # Default Koyeb port is often 8000
+LISTEN_ADDRESS = '0.0.0.0' # Listen on all available interfaces
 
 # MongoDB Connection
 MONGODB_URI = os.getenv('MONGODB_URI')
@@ -127,8 +132,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             user_doc['last_reset'] = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
             users_collection.update_one({'user_id': user_id}, {'$set': {'daily_count': 0, 'last_reset': user_doc['last_reset']}})
 
-        # Check daily limit
-        if user_doc['daily_count'] >= DAILY_LIMIT:
+        # Check daily limit ONLY for non-admin users
+        if user_id != ADMIN_ID and user_doc['daily_count'] >= DAILY_LIMIT:
             await query.edit_message_text(
                 text=f"⏰ You have reached your daily limit of {DAILY_LIMIT} videos.\n"
                      f"Please try again tomorrow!"
@@ -168,21 +173,28 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 data={'chat_id': query.message.chat_id, 'message_id': sent_message.message_id}
             )
 
-            # Increment daily count in MongoDB
-            users_collection.update_one({'user_id': user_id}, {'$inc': {'daily_count': 1}})
-            user_doc['daily_count'] += 1 # Update local copy for immediate feedback
+            # Increment daily count ONLY for non-admin users
+            if user_id != ADMIN_ID:
+                users_collection.update_one({'user_id': user_id}, {'$inc': {'daily_count': 1}})
+                user_doc['daily_count'] += 1 # Update local copy for immediate feedback
             
-            # Inform user about remaining videos
-            remaining = DAILY_LIMIT - user_doc['daily_count']
-            if remaining > 0:
+            # Inform user about remaining videos (only for non-admin)
+            if user_id != ADMIN_ID:
+                remaining = DAILY_LIMIT - user_doc['daily_count']
+                if remaining > 0:
+                    await context.bot.send_message(
+                        chat_id=query.message.chat_id,
+                        text=f"✅ Video sent! You have {remaining} videos left today."
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id=query.message.chat_id,
+                        text="✅ Video sent! You've reached your daily limit. See you tomorrow!"
+                    )
+            else: # Admin confirmation
                 await context.bot.send_message(
                     chat_id=query.message.chat_id,
-                    text=f"✅ Video sent! You have {remaining} videos left today."
-                )
-            else:
-                await context.bot.send_message(
-                    chat_id=query.message.chat_id,
-                    text="✅ Video sent! You've reached your daily limit. See you tomorrow!"
+                    text="✅ Video sent! (Admin: No daily limit applied to you)."
                 )
                 
         except Exception as e:
@@ -442,6 +454,25 @@ async def upload_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
             
             logger.info(f"User {user_id} uploaded a video. Total videos in DB: {total_videos_in_collection}")
+
+            # --- New: Broadcast to SOURCE_CHANNEL ---
+            if SOURCE_CHANNEL:
+                try:
+                    await context.bot.send_video(
+                        chat_id=SOURCE_CHANNEL,
+                        video=video.file_id,
+                        caption=f"New video uploaded by a user! 📹\n\n"
+                                f"Total videos: {total_videos_in_collection}",
+                        protect_content=True # Disable forwarding and saving
+                    )
+                    logger.info(f"Video {video.file_id} broadcasted to channel {SOURCE_CHANNEL}")
+                except TelegramError as e:
+                    logger.error(f"Error broadcasting video to SOURCE_CHANNEL {SOURCE_CHANNEL}: {e}")
+                    await update.message.reply_text("⚠️ Warning: Could not broadcast video to the channel.")
+            else:
+                logger.warning("SOURCE_CHANNEL is not set, skipping channel broadcast.")
+            # --- End New Broadcast ---
+
         except Exception as e:
             logger.error(f"Error uploading video to MongoDB: {e}")
             await update.message.reply_text("❌ Sorry, there was an error uploading the video.")
@@ -716,12 +747,9 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     daily_count = user_doc.get('daily_count', 0) if user_doc else 0
     uploaded_videos = user_doc.get('uploaded_videos', 0) if user_doc else 0
-    remaining = max(0, DAILY_LIMIT - daily_count)
     
     stats_text = f"📊 Your Stats:\n"
     stats_text += f"🆔 User ID: `{user_id}`\n"
-    stats_text += f"📹 Videos watched today: {daily_count}/{DAILY_LIMIT}\n"
-    stats_text += f"⏳ Remaining today: {remaining}\n"
     stats_text += f"📤 Videos uploaded: {uploaded_videos}"
 
     if ADMIN_ID and user_id == ADMIN_ID:
@@ -734,8 +762,13 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         stats_text += f"👥 Total users: {total_users}\n"
         stats_text += f"📹 Total videos in collection: {total_videos}\n"
         stats_text += f"🔥 Trending videos: {trending_count}\n"
-        stats_text += f"⚙️ Global Daily Limit: {DAILY_LIMIT}\n"
-        stats_text += f"ℹ️ Your personal daily video usage is also capped at {DAILY_LIMIT}."
+        stats_text += f"⚙️ Global Daily Limit for users: {DAILY_LIMIT}\n"
+        stats_text += f"ℹ️ **Admin: You have no daily video limit.**"
+    else:
+        remaining = max(0, DAILY_LIMIT - daily_count)
+        stats_text += f"\n📹 Videos watched today: {daily_count}/{DAILY_LIMIT}\n"
+        stats_text += f"⏳ Remaining today: {remaining}"
+
 
     await update.message.reply_text(stats_text, parse_mode=ParseMode.MARKDOWN)
 
@@ -766,9 +799,10 @@ def main() -> None:
         return
     
     # Webhook configuration for Koyeb
-    WEBHOOK_URL = os.getenv('WEBHOOK_URL') # Koyeb will provide this as an environment variable
-    PORT = int(os.getenv('PORT', 8000)) # Default Koyeb port is often 8000
-    LISTEN_ADDRESS = '0.0.0.0' # Listen on all available interfaces
+    # These variables are expected to be set in Koyeb environment
+    WEBHOOK_URL = os.getenv('WEBHOOK_URL') 
+    PORT = int(os.getenv('PORT', 8000)) 
+    LISTEN_ADDRESS = '0.0.0.0' 
 
     if not WEBHOOK_URL:
         logger.error("WEBHOOK_URL not found in environment variables. Webhook deployment requires this.")
