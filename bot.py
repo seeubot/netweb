@@ -4,7 +4,6 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from flask import Flask
 from bs4 import BeautifulSoup
 from datetime import datetime
-import pyperclip
 import requests
 
 # ----------------------- Config -----------------------
@@ -128,7 +127,6 @@ def shorten_url(long_url):
     response = requests.get(api_url)
     if response.status_code == 200:
         short_url = response.text
-        pyperclip.copy(short_url)  # Copy to clipboard
         return short_url
     else:
         return long_url
