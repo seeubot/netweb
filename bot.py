@@ -8,6 +8,7 @@ from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, JobQueue
 from telegram.error import TelegramError
 from dotenv import load_dotenv
+import pymongo # Import pymongo
 
 # Load environment variables from .env file
 load_dotenv()
@@ -25,14 +26,25 @@ SOURCE_CHANNEL = os.getenv('SOURCE_CHANNEL')  # Channel to fetch videos from
 ADMIN_ID = int(os.getenv('ADMIN_ID')) if os.getenv('ADMIN_ID') else None
 DAILY_LIMIT = int(os.getenv('DAILY_LIMIT', 5))
 
-# Webhook configuration for Koyeb
-WEBHOOK_URL = os.getenv('WEBHOOK_URL') # Koyeb will provide this as an environment variable
-PORT = int(os.getenv('PORT', 8000)) # Default Koyeb port is often 8000
-LISTEN_ADDRESS = '0.0.0.0' # Listen on all available interfaces
+# MongoDB Connection
+MONGODB_URI = os.getenv('MONGODB_URI')
+if not MONGODB_URI:
+    logger.error("MONGODB_URI not found in environment variables. Please set it.")
+    exit(1) # Exit if no MongoDB URI is provided
 
-# Store video file IDs and message IDs for deletion
-video_storage = []
-sent_messages = []  # Store message info for deletion
+try:
+    client = pymongo.MongoClient(MONGODB_URI)
+    db = client.get_database("telegram_bot_db") # Name your database
+    users_collection = db.users
+    videos_collection = db.videos
+    trending_videos_collection = db.trending_videos
+    logger.info("Successfully connected to MongoDB.")
+except pymongo.errors.ConnectionFailure as e:
+    logger.error(f"Could not connect to MongoDB: {e}")
+    exit(1)
+
+# Store message info for deletion (this is for Telegram messages, not database entries)
+sent_messages = [] 
 
 async def fetch_videos_from_channel(context: ContextTypes.DEFAULT_TYPE):
     """Fetch videos from the source channel (placeholder for future implementation)"""
@@ -41,14 +53,13 @@ async def fetch_videos_from_channel(context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
-        # Get chat info
         chat = await context.bot.get_chat(SOURCE_CHANNEL)
         logger.info(f"Fetching videos from channel: {chat.title}")
         
         # In a real implementation, you would need to store video IDs when they're posted
-        # For now, we'll use the stored videos or add some sample ones for testing
-        if not video_storage:
-            logger.info("No videos in storage. Add some videos to the source channel and upload them via the bot.")
+        # For now, we'll rely on user uploads
+        if await videos_collection.count_documents({}) == 0:
+            logger.info("No videos in database. Users need to upload some videos.")
             
     except TelegramError as e:
         logger.error(f"Error accessing source channel {SOURCE_CHANNEL}: {e}")
@@ -58,7 +69,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     user_id = user.id
     
-    # Send user ID to user for reference
+    # Ensure user data exists in DB, initialize if not
+    user_doc = users_collection.find_one({'user_id': user_id})
+    if not user_doc:
+        users_collection.insert_one({
+            'user_id': user_id,
+            'daily_count': 0,
+            'last_reset': datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0),
+            'uploaded_videos': 0
+        })
+        logger.info(f"New user {user_id} registered in MongoDB.")
+
     welcome_message = f"Welcome, {user.mention_markdown_v2()}\\!\n\n"
     welcome_message += f"Your User ID: `{user_id}`\n\n"
     welcome_message += "This bot sends random videos from our collection\\.\n"
@@ -86,45 +107,50 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if query.data == 'get_video':
         user_id = query.from_user.id
         
-        # Initialize user data if not exists
-        if 'users' not in context.bot_data:
-            context.bot_data['users'] = {}
-        
-        if user_id not in context.bot_data['users']:
-            context.bot_data['users'][user_id] = {
+        user_doc = users_collection.find_one({'user_id': user_id})
+        if not user_doc:
+            # This should ideally not happen if start command is used, but as a fallback
+            users_collection.insert_one({
+                'user_id': user_id,
                 'daily_count': 0,
-                'last_reset': datetime.date.today()
-            }
-        
-        user_data = context.bot_data['users'][user_id]
+                'last_reset': datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0),
+                'uploaded_videos': 0
+            })
+            user_doc = users_collection.find_one({'user_id': user_id}) # Re-fetch after insert
+
+        # Convert last_reset from datetime to date for comparison
+        last_reset_date = user_doc['last_reset'].date() if isinstance(user_doc['last_reset'], datetime.datetime) else user_doc['last_reset']
         
         # Reset daily count if it's a new day
-        if user_data['last_reset'] != datetime.date.today():
-            user_data['daily_count'] = 0
-            user_data['last_reset'] = datetime.date.today()
-        
+        if last_reset_date != datetime.date.today():
+            user_doc['daily_count'] = 0
+            user_doc['last_reset'] = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            users_collection.update_one({'user_id': user_id}, {'$set': {'daily_count': 0, 'last_reset': user_doc['last_reset']}})
+
         # Check daily limit
-        if user_data['daily_count'] >= DAILY_LIMIT:
+        if user_doc['daily_count'] >= DAILY_LIMIT:
             await query.edit_message_text(
                 text=f"⏰ You have reached your daily limit of {DAILY_LIMIT} videos.\n"
                      f"Please try again tomorrow!"
             )
             return
 
-        # Get available videos
-        if not video_storage:
+        # Get available videos from MongoDB
+        video_docs = list(videos_collection.find({}))
+        if not video_docs:
             await query.edit_message_text(text="📹 No videos available at the moment.\nPlease upload some videos first!")
             return
 
         try:
             # Select random video
-            random_video = random.choice(video_storage)
+            random_video_doc = random.choice(video_docs)
+            random_video_file_id = random_video_doc['file_id']
             await query.edit_message_text(text="📹 Here is your random video:")
             
             # Send video with content protection
             sent_message = await context.bot.send_video(
                 chat_id=query.message.chat_id, 
-                video=random_video,
+                video=random_video_file_id,
                 protect_content=True # Disable forwarding and saving
             )
             
@@ -142,11 +168,12 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 data={'chat_id': query.message.chat_id, 'message_id': sent_message.message_id}
             )
 
-            # Increment daily count
-            user_data['daily_count'] += 1
+            # Increment daily count in MongoDB
+            users_collection.update_one({'user_id': user_id}, {'$inc': {'daily_count': 1}})
+            user_doc['daily_count'] += 1 # Update local copy for immediate feedback
             
             # Inform user about remaining videos
-            remaining = DAILY_LIMIT - user_data['daily_count']
+            remaining = DAILY_LIMIT - user_doc['daily_count']
             if remaining > 0:
                 await context.bot.send_message(
                     chat_id=query.message.chat_id,
@@ -166,18 +193,15 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.edit_message_text(text="📤 Please send me the video you want to upload.")
 
     elif query.data == 'trending_videos':
-        trending_videos = []
-        if os.path.exists('trending_videos.txt'):
-            with open('trending_videos.txt', 'r') as file:
-                trending_videos = [line.strip() for line in file.readlines() if line.strip()]
+        trending_video_docs = list(trending_videos_collection.find({}))
 
-        if trending_videos:
+        if trending_video_docs:
             await query.edit_message_text(text="🔥 Here are the trending videos:")
-            for video_id in trending_videos[:3]:  # Limit to 3 trending videos
+            for video_doc in trending_video_docs[:3]:  # Limit to 3 trending videos
                 try:
                     sent_message = await context.bot.send_video(
                         chat_id=query.message.chat_id, 
-                        video=video_id,
+                        video=video_doc['file_id'],
                         protect_content=True # Disable forwarding and saving
                     )
                     
@@ -189,7 +213,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     )
                     
                 except TelegramError as e:
-                    logger.error(f"Error sending trending video {video_id}: {e}")
+                    logger.error(f"Error sending trending video {video_doc['file_id']}: {e}")
         else:
             await query.edit_message_text(text="📹 No trending videos available at the moment.")
 
@@ -280,20 +304,13 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
             
         # Show admin statistics
-        total_users = len(context.bot_data.get('users', {}))
-        total_videos = len(video_storage)
-        
-        trending_count = 0
-        if os.path.exists('trending_videos.txt'):
-            with open('trending_videos.txt', 'r') as file:
-                trending_count = len([line for line in file.readlines() if line.strip()])
+        total_users = users_collection.count_documents({})
+        total_videos = videos_collection.count_documents({})
+        trending_count = trending_videos_collection.count_documents({})
         
         # Calculate active users (users who used bot today)
-        today = datetime.date.today()
-        active_today = 0
-        for user_data in context.bot_data.get('users', {}).values():
-            if user_data.get('last_reset') == today and user_data.get('daily_count', 0) > 0:
-                active_today += 1
+        today = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        active_today = users_collection.count_documents({'last_reset': today, 'daily_count': {'$gt': 0}})
         
         stats_text = f"📊 **Bot Statistics**\n\n"
         stats_text += f"👥 Total users: {total_users}\n"
@@ -317,10 +334,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await query.edit_message_text(text="❌ Access denied.")
             return
             
-        trending_videos = []
-        if os.path.exists('trending_videos.txt'):
-            with open('trending_videos.txt', 'r') as file:
-                trending_videos = [line.strip() for line in file.readlines() if line.strip()]
+        trending_count = trending_videos_collection.count_documents({})
         
         trending_keyboard = [
             [InlineKeyboardButton("➕ Add Trending", callback_data='add_trending')],
@@ -331,7 +345,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         await query.edit_message_text(
             text=f"🔥 **Trending Management**\n\n"
-                 f"Current trending videos: {len(trending_videos)}\n\n"
+                 f"Current trending videos: {trending_count}\n\n"
                  f"• Add new trending videos\n"
                  f"• Clear all trending videos",
             reply_markup=reply_markup,
@@ -356,11 +370,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
             
         try:
-            if os.path.exists('trending_videos.txt'):
-                os.remove('trending_videos.txt')
-            
+            result = trending_videos_collection.delete_many({})
             await query.edit_message_text(
-                text="✅ All trending videos cleared successfully!"
+                text=f"✅ Cleared {result.deleted_count} trending videos successfully!"
             )
         except Exception as e:
             logger.error(f"Error clearing trending videos: {e}")
@@ -401,31 +413,38 @@ async def upload_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Check if admin is in broadcast or trending mode
     if ADMIN_ID and user_id == ADMIN_ID:
         if context.user_data.get('broadcast_mode') or context.user_data.get('trending_mode'):
-            await handle_admin_content(update, context) # Renamed to handle all admin content
+            await handle_admin_content(update, context) 
             return
     
-    if 'users' not in context.bot_data:
-        context.bot_data['users'] = {}
-    
-    if user_id not in context.bot_data['users']:
-        context.bot_data['users'][user_id] = {'uploaded_videos': 0}
-    
-    user_data = context.bot_data['users'][user_id]
-
     video = update.message.video
     if video:
-        # Store video file ID
-        video_storage.append(video.file_id)
-        
-        user_data['uploaded_videos'] = user_data.get('uploaded_videos', 0) + 1
+        try:
+            # Store video file ID in MongoDB
+            videos_collection.insert_one({
+                'file_id': video.file_id,
+                'uploaded_by': user_id,
+                'uploaded_at': datetime.datetime.now()
+            })
+            
+            # Update user's uploaded videos count in MongoDB
+            users_collection.update_one(
+                {'user_id': user_id},
+                {'$inc': {'uploaded_videos': 1}},
+                upsert=True # Create user if not exists (should already exist from /start)
+            )
+            
+            total_videos_in_collection = videos_collection.count_documents({})
 
-        await update.message.reply_text(
-            f"✅ Video uploaded successfully!\n"
-            f"📊 Total videos uploaded: {user_data['uploaded_videos']}\n"
-            f"📹 Total videos in collection: {len(video_storage)}"
-        )
-        
-        logger.info(f"User {user_id} uploaded a video. Total videos: {len(video_storage)}")
+            await update.message.reply_text(
+                f"✅ Video uploaded successfully!\n"
+                f"📊 Total videos you uploaded: {users_collection.find_one({'user_id': user_id}).get('uploaded_videos', 0)}\n"
+                f"📹 Total videos in collection: {total_videos_in_collection}"
+            )
+            
+            logger.info(f"User {user_id} uploaded a video. Total videos in DB: {total_videos_in_collection}")
+        except Exception as e:
+            logger.error(f"Error uploading video to MongoDB: {e}")
+            await update.message.reply_text("❌ Sorry, there was an error uploading the video.")
     else:
         await update.message.reply_text("❌ Please send a valid video file.")
 
@@ -442,14 +461,18 @@ async def handle_admin_content(update: Update, context: ContextTypes.DEFAULT_TYP
         video = update.message.video
         if video:
             try:
-                with open('trending_videos.txt', 'a') as file:
-                    file.write(f"{video.file_id}\n")
+                # Store trending video file ID in MongoDB
+                trending_videos_collection.insert_one({
+                    'file_id': video.file_id,
+                    'added_by': update.message.from_user.id,
+                    'added_at': datetime.datetime.now()
+                })
                 
                 await update.message.reply_text("✅ Video added to trending list successfully!")
                 context.user_data.pop('trending_mode', None)
                 
             except Exception as e:
-                logger.error(f"Error adding trending video: {e}")
+                logger.error(f"Error adding trending video to MongoDB: {e}")
                 await update.message.reply_text("❌ Error adding video to trending list.")
         else:
             await update.message.reply_text("❌ Please send a video file.")
@@ -458,8 +481,8 @@ async def handle_admin_content(update: Update, context: ContextTypes.DEFAULT_TYP
     if not broadcast_mode:
         return
     
-    # Get all users
-    all_users = list(context.bot_data.get('users', {}).keys())
+    # Get all users from MongoDB
+    all_users = [doc['user_id'] for doc in users_collection.find({}, {'user_id': 1})]
     
     if not all_users:
         await update.message.reply_text("❌ No users found to broadcast to.")
@@ -621,8 +644,8 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text("Please reply to a message to broadcast.")
         return
 
-    # Get all users who have interacted with the bot
-    all_users = list(context.bot_data.get('users', {}).keys())
+    # Get all users who have interacted with the bot from MongoDB
+    all_users = [doc['user_id'] for doc in users_collection.find({}, {'user_id': 1})]
     
     if not all_users:
         await update.message.reply_text("No users found in database.")
@@ -674,8 +697,12 @@ async def trending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     try:
-        with open('trending_videos.txt', 'a') as file:
-            file.write(f"{message.video.file_id}\n")
+        # Store trending video file ID in MongoDB
+        trending_videos_collection.insert_one({
+            'file_id': message.video.file_id,
+            'added_by': update.message.from_user.id,
+            'added_at': datetime.datetime.now()
+        })
         
         await update.message.reply_text("✅ Video marked as trending.")
     except Exception as e:
@@ -685,10 +712,10 @@ async def trending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Shows bot statistics for users or admin."""
     user_id = update.message.from_user.id
-    user_data = context.bot_data.get('users', {}).get(user_id, {})
+    user_doc = users_collection.find_one({'user_id': user_id})
     
-    daily_count = user_data.get('daily_count', 0)
-    uploaded_videos = user_data.get('uploaded_videos', 0)
+    daily_count = user_doc.get('daily_count', 0) if user_doc else 0
+    uploaded_videos = user_doc.get('uploaded_videos', 0) if user_doc else 0
     remaining = max(0, DAILY_LIMIT - daily_count)
     
     stats_text = f"📊 Your Stats:\n"
@@ -699,13 +726,9 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if ADMIN_ID and user_id == ADMIN_ID:
         # Admin-specific stats
-        total_users = len(context.bot_data.get('users', {}))
-        total_videos = len(video_storage)
-        
-        trending_count = 0
-        if os.path.exists('trending_videos.txt'):
-            with open('trending_videos.txt', 'r') as file:
-                trending_count = len([line for line in file.readlines() if line.strip()])
+        total_users = users_collection.count_documents({})
+        total_videos = videos_collection.count_documents({})
+        trending_count = trending_videos_collection.count_documents({})
         
         stats_text += f"\n\n📊 **Bot Admin Statistics:**\n"
         stats_text += f"👥 Total users: {total_users}\n"
@@ -741,6 +764,12 @@ def main() -> None:
     if not API_TOKEN:
         logger.error("TELEGRAM_API_TOKEN not found in environment variables")
         return
+    
+    # Webhook configuration for Koyeb
+    WEBHOOK_URL = os.getenv('WEBHOOK_URL') # Koyeb will provide this as an environment variable
+    PORT = int(os.getenv('PORT', 8000)) # Default Koyeb port is often 8000
+    LISTEN_ADDRESS = '0.0.0.0' # Listen on all available interfaces
+
     if not WEBHOOK_URL:
         logger.error("WEBHOOK_URL not found in environment variables. Webhook deployment requires this.")
         return
