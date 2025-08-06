@@ -2,7 +2,8 @@ import os
 import random
 import logging
 import datetime
-from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode
+from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from dotenv import load_dotenv
 
