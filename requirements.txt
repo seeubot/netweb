@@ -1,3 +1,3 @@
-python-telegram-bot[job-queue]==21.2 # Or the specific version you are using
-python-dotenv==1.0.0 # Or the specific version you are using
+python-telegram-bot[job-queue] # This will install the latest compatible version
+python-dotenv==1.0.0 # Keep this as is, or update if desired
 
