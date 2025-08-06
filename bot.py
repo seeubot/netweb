@@ -5,7 +5,7 @@ import datetime
 import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, JobQueue
 from telegram.error import TelegramError
 from dotenv import load_dotenv
 
@@ -729,6 +729,10 @@ def main() -> None:
         return
     
     application = Application.builder().token(API_TOKEN).build()
+
+    # Initialize and attach JobQueue
+    application.job_queue = JobQueue()
+    application.job_queue.set_application(application)
 
     # Add handlers
     application.add_handler(CommandHandler("start", start))
