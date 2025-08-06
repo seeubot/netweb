@@ -1,254 +1,197 @@
-import asyncio, aiohttp, threading, json
-from pyrogram import Client, filters, enums
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
-from flask import Flask
-from bs4 import BeautifulSoup
-from datetime import datetime
-import requests
+import os
+import random
+import logging
+import datetime
+from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from dotenv import load_dotenv
 
-# ----------------------- Config -----------------------
-API_ID = 23054736
-API_HASH = "d538c2e1a687d414f5c3dce7bf4a743c"
-BOT_TOKEN = "6578034792:AAGbSGcWlxg1jUT73WYS_xpdAJsYy0Rrk0A"
-ADMIN_ID = 1352497419
-CHANNEL_ID = "seeu_bin"
+# Load environment variables from .env file
+load_dotenv()
 
-app = Client("mega_nsfw", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-flask_app = Flask(__name__)
-user_keywords = {}
-user_favs = {}
+# Enable logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-@flask_app.route("/")
-def home(): return "🔥 Mega NSFW Bot is running!"
+# Load environment variables
+API_TOKEN = os.getenv('TELEGRAM_API_TOKEN')
+PREMIUM_CHANNEL = os.getenv('PREMIUM_CHANNEL')
+TRANSFER_CHANNEL = os.getenv('TRANSFER_CHANNEL')
+ADMIN_ID = os.getenv('ADMIN_ID')
+DAILY_LIMIT = int(os.getenv('DAILY_LIMIT', 5))
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 
-def run_flask(): flask_app.run(host="0.0.0.0", port=8080)
+# Premium plan details
+PREMIUM_PLANS = {
+    '1_week': 20,
+    '1_month': 50,
+    'lifetime': 149
+}
 
-# ----------------------- Scraper -----------------------
-async def fetch_videos(query, site="pornhub", limit=5):
-    url, selector, base = "", "", ""
-    result = []
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    welcome_message = f"Welcome, {user.mention_markdown_v2()}!\n\n"
+    welcome_message += "This is a Telegram bot that can send random videos from a group or channel.\n"
+    welcome_message += "Use the buttons below to get a random video, access the premium plan, or upload your own videos."
 
-    if site == "pornhub":
-        url = f"https://www.pornhub.com/video/search?search={query}"
-        selector = ".videoPreviewBg"
-        base = "https://www.pornhub.com"
-    elif site == "xnxx":
-        url = f"https://www.xnxx.com/search/{query}"
-        selector = "div.mozaique .thumb"
-        base = "https://www.xnxx.com"
-    elif site == "xhamster":
-        url = f"https://xhamster.com/search/{query}"
-        selector = ".thumb-list__item"
-        base = "https://xhamster.com"
-    elif site == "redtube":
-        url = f"https://www.redtube.com/?search={query}"
-        selector = ".thumb-block"
-        base = "https://www.redtube.com"
-    elif site == "youporn":
-        url = f"https://www.youporn.com/search/?query={query}"
-        selector = ".video-box"
-        base = "https://www.youporn.com"
-    elif site == "spankbang":
-        url = f"https://www.spankbang.com/search/{query}"
-        selector = ".video-item"
-        base = "https://www.spankbang.com"
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as res:
-                html = await res.text()
-        soup = BeautifulSoup(html, "lxml")
-        videos = soup.select(selector)
-        for item in videos[:limit]:
-            try:
-                if site == "pornhub":
-                    title = item.get("data-title", "N/A")
-                    link = base + item.get("href", "")
-                    thumb = item.get("data-thumb_url", "")
-                    duration = item.select_one(".duration").text.strip() if item.select_one(".duration") else "N/A"
-                elif site == "xnxx":
-                    a = item.find("a")
-                    title = a.get("title", "N/A")
-                    link = base + a.get("href", "")
-                    thumb = a.img.get("data-src", a.img.get("src", ""))
-                    duration = "N/A"
-                elif site == "xhamster":
-                    a = item.find("a")
-                    title = a.img.get("alt", "N/A")
-                    link = a.get("href", "")
-                    thumb = a.img.get("src", "")
-                    duration = "N/A"
-                elif site == "redtube":
-                    a = item.find("a")
-                    title = a.get("title", "N/A")
-                    link = base + a.get("href", "")
-                    thumb = a.img.get("src", "")
-                    duration = "N/A"
-                elif site == "youporn":
-                    a = item.find("a")
-                    title = a.get("title", "N/A")
-                    link = base + a.get("href", "")
-                    thumb = a.img.get("src", "")
-                    duration = "N/A"
-                elif site == "spankbang":
-                    a = item.find("a")
-                    title = a.get("title", "N/A")
-                    link = base + a.get("href", "")
-                    thumb = a.img.get("src", "")
-                    duration = "N/A"
-                result.append({
-                    "title": title,
-                    "thumb": thumb,
-                    "url": link,
-                    "duration": duration,
-                    "site": site.upper()
-                })
-            except Exception as e:
-                print(f"Parsing error: {e}")
-                continue
-    except Exception as e:
-        print(f"Scraping error: {e}")
-    return result
-
-# ----------------------- Button UI -----------------------
-def video_buttons(url, fav=False):
-    short_url = shorten_url(url)
-    buttons = [
-        [InlineKeyboardButton("▶️ Watch", url=short_url)],
-        [InlineKeyboardButton("🎯 Suggest More", callback_data="suggest")],
-        [InlineKeyboardButton("📥 Download", url=short_url)]
+    keyboard = [
+        [InlineKeyboardButton("Get Random Video", callback_data='get_video')],
+        [InlineKeyboardButton("Premium Plan", callback_data='premium_plan')],
+        [InlineKeyboardButton("Upload Video", callback_data='upload_video')],
+        [InlineKeyboardButton("Trending Videos", callback_data='trending_videos')]
     ]
-    if fav:
-        buttons.append([InlineKeyboardButton("❤️ Add to Favorites", callback_data=f"fav_{short_url}")])
-    return InlineKeyboardMarkup(buttons)
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-def shorten_url(long_url):
-    api_url = "http://tinyurl.com/api-create.php?url=" + long_url
-    response = requests.get(api_url)
-    if response.status_code == 200:
-        short_url = response.text
-        return short_url
-    else:
-        return long_url
+    await update.message.reply_text(welcome_message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
 
-# ----------------------- Bot Commands -----------------------
-@app.on_message(filters.command("start"))
-async def start(client, msg: Message):
-    user_keywords[msg.from_user.id] = "trending"
-    await msg.reply(
-        "🔥 **Welcome to Mega NSFW Bot!**\n\n"
-        "Type any keyword to search videos from Pornhub, XNXX, XHamster, RedTube, YouPorn, SpankBang.\n"
-        "Use /help to see available commands.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔥 Trending", callback_data="trending"),
-             InlineKeyboardButton("📈 Weekly Top", callback_data="weekly")],
-            [InlineKeyboardButton("❤️ Favorites", callback_data="favlist"),
-             InlineKeyboardButton("🛠 Admin", callback_data="admin")]
-        ])
-    )
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
 
-@app.on_message(filters.command("help"))
-async def help_msg(client, msg):
-    await msg.reply(
-        "**📘 Commands List**\n\n"
-        "`/start` - Start the bot\n"
-        "`/help` - Show help\n"
-        "`/stats` - Show bot stats\n"
-        "`/admin` - Admin panel (admin only)\n\n"
-        "📌 **Just send any keyword like:**\n"
-        "`mia khalifa`, `lesbian`, `bd girl`, `hentai`"
-    )
+    if query.data == 'get_video':
+        user_id = query.from_user.id
+        user_data = context.user_data
+        if user_id not in user_data:
+            user_data[user_id] = {'daily_count': 0}
 
-@app.on_message(filters.command("stats"))
-async def stats_msg(client, msg):
-    u_count = len(user_keywords)
-    f_count = sum(len(v) for v in user_favs.values())
-    await msg.reply(f"📊 **Bot Stats**\n\n👤 Total Users: {u_count}\n❤️ Total Favorites: {f_count}")
+        if user_data[user_id]['daily_count'] >= DAILY_LIMIT:
+            await query.edit_message_text(text="You have reached your daily limit. Please upgrade to a premium plan to continue.")
+            return
 
-@app.on_message(filters.command("admin") & filters.user(ADMIN_ID))
-async def admin_panel(client, msg):
-    await msg.reply("🛠 **Admin Panel**",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("📤 Post Trending Now", callback_data="post_now")],
-                        [InlineKeyboardButton("📊 View Stats", callback_data="stats")]
-                    ]))
-
-# ----------------------- Search Handler -----------------------
-@app.on_message(filters.text & ~filters.command(["start", "help", "stats", "admin"]))
-async def search_handler(client, msg):
-    query = msg.text.strip()
-    uid = msg.from_user.id
-    user_keywords[uid] = query
-    sites = ["pornhub", "xnxx", "xhamster", "redtube", "youporn", "spankbang"]
-    for site in sites:
-        await msg.reply(f"🔍 Searching `{query}` on **{site.upper()}**...")
-        videos = await fetch_videos(query, site)
+        # Fetch videos from the transfer channel
+        videos = context.bot.get_chat(TRANSFER_CHANNEL).get_messages()
         if not videos:
-            await msg.reply(f"❌ No results found on {site.upper()}")
-            continue
-        for vid in videos:
-            caption = f"🎬 **{vid['title']}**\n⏱ {vid['duration']} | 🌐 {vid['site']}"
-            short_url = shorten_url(vid["url"])
-            await msg.reply_photo(photo=vid["thumb"], caption=caption,
-                                  reply_markup=video_buttons(short_url, fav=True))
+            await query.edit_message_text(text="No videos available at the moment.")
+            return
 
-# ----------------------- Callback Handler -----------------------
-@app.on_callback_query()
-async def cb(client, cbq):
-    data = cbq.data
-    uid = cbq.from_user.id
+        random_video = random.choice(videos)
+        message = await query.edit_message_text(text="Here is your random video:", video=random_video.video.file_id)
+        context.job_queue.run_once(delete_message, 300, context=message.message_id)  # Delete after 5 minutes
 
-    if data == "trending":
-        vids = await fetch_videos("trending", "pornhub")
-    elif data == "weekly":
-        vids = await fetch_videos("top+weekly", "pornhub")
-    elif data == "suggest":
-        key = user_keywords.get(uid, "popular")
-        vids = await fetch_videos(key, "pornhub")
-    elif data.startswith("fav_"):
-        url = data.replace("fav_", "")
-        if uid not in user_favs:
-            user_favs[uid] = []
-        if url not in user_favs[uid]:
-            user_favs[uid].append(url)
-        return await cbq.answer("✅ Added to favorites")
-    elif data == "favlist":
-        favs = user_favs.get(uid, [])
-        if not favs:
-            return await cbq.message.reply("❌ No favorites saved.")
-        btns = [[InlineKeyboardButton(f"❤️ Favorite {i+1}", url=favs[i])] for i in range(min(len(favs), 10))]
-        return await cbq.message.reply("📁 **Your Saved Favorites:**", reply_markup=InlineKeyboardMarkup(btns))
-    elif data == "post_now":
-        await post_trending_now()
-        return await cbq.answer("✅ Posted trending video to channel!")
-    elif data == "stats":
-        return await stats_msg(client, cbq.message)
+        user_data[user_id]['daily_count'] += 1
+
+    elif query.data == 'premium_plan':
+        premium_message = "Choose your premium plan:\n"
+        premium_message += "1. 1 Week - ₹20\n"
+        premium_message += "2. 1 Month - ₹50\n"
+        premium_message += "3. Lifetime - ₹149\n"
+        premium_message += "Reply with the number corresponding to your choice."
+
+        keyboard = [
+            [InlineKeyboardButton("1 Week", callback_data='plan_1_week')],
+            [InlineKeyboardButton("1 Month", callback_data='plan_1_month')],
+            [InlineKeyboardButton("Lifetime", callback_data='plan_lifetime')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(text=premium_message, reply_markup=reply_markup)
+
+    elif query.data.startswith('plan_'):
+        plan_type = query.data.split('_')[1]
+        price = PREMIUM_PLANS[plan_type]
+        user_id = query.from_user.id
+        user_data = context.user_data
+
+        # Here you would typically integrate with a payment gateway to process the payment
+        # For simplicity, we'll assume the payment is successful and add the user to the premium channel
+
+        if plan_type == 'lifetime':
+            user_data[user_id] = {'premium': True, 'expiry': None}
+        else:
+            user_data[user_id] = {'premium': True, 'expiry': datetime.datetime.now() + datetime.timedelta(days=7 if plan_type == '1_week' else 30)}
+
+        await context.bot.add_chat_members(chat_id=PREMIUM_CHANNEL, user_id=user_id)
+        await query.edit_message_text(text=f"You have successfully subscribed to the {plan_type.replace('_', ' ').capitalize()} plan for ₹{price}.")
+
+    elif query.data == 'upload_video':
+        await query.edit_message_text(text="Please send me the video you want to upload.")
+
+    elif query.data == 'trending_videos':
+        trending_videos = []
+        if os.path.exists('trending_videos.txt'):
+            with open('trending_videos.txt', 'r') as file:
+                trending_videos = file.readlines()
+
+        if trending_videos:
+            for video_id in trending_videos:
+                video_id = video_id.strip()
+                await query.edit_message_text(text="Here are the trending videos:", video=video_id)
+        else:
+            await query.edit_message_text(text="No trending videos available at the moment.")
+
+async def upload_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.message.from_user.id
+    user_data = context.user_data
+    if user_id not in user_data:
+        user_data[user_id] = {'uploaded_videos': 0}
+
+    video = update.message.video
+    if video:
+        message = await context.bot.send_video(chat_id=TRANSFER_CHANNEL, video=video.file_id)
+        user_data[user_id]['uploaded_videos'] += 1
+
+        if user_data[user_id]['uploaded_videos'] >= 10:
+            user_data[user_id] = {'premium': True, 'expiry': datetime.datetime.now() + datetime.timedelta(days=7)}
+            await context.bot.add_chat_members(chat_id=PREMIUM_CHANNEL, user_id=user_id)
+            await update.message.reply_text("Congratulations! You have uploaded 10 videos and activated a 1-week premium plan.")
+
+        await update.message.reply_text("Video uploaded successfully.")
     else:
-        return await cbq.answer("⚠️ Unknown Action")
+        await update.message.reply_text("Please send a valid video file.")
 
-    # If video list present, send first 3
-    for vid in vids[:3]:
-        caption = f"🎬 **{vid['title']}**\n⏱ {vid['duration']} | 🌐 {vid['site']}"
-        await cbq.message.reply_photo(photo=vid["thumb"], caption=caption,
-                                      reply_markup=video_buttons(vid["url"], fav=True))
-    await cbq.answer()
+async def delete_message(context: ContextTypes.DEFAULT_TYPE) -> None:
+    message_id = context.job.context
+    await context.bot.delete_message(chat_id=context.job.chat_id, message_id=message_id)
 
-# ----------------------- Auto Post System -----------------------
-async def post_trending_now():
-    vids = await fetch_videos("trending", "pornhub")
-    for vid in vids[:1]:
-        caption = f"🔥 **Viral Now**\n🎬 {vid['title']}\n⏱ {vid['duration']} | 🌐 {vid['site']}"
-        await app.send_photo(CHANNEL_ID, vid["thumb"], caption=caption,
-                             reply_markup=video_buttons(vid["url"]))
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Only admin can use this command.")
+        return
 
-async def auto_poster():
-    while True:
-        await post_trending_now()
-        await asyncio.sleep(2000)  # Every 1 hour
+    message = update.message.reply_to_message
+    if not message:
+        await update.message.reply_text("Reply to a message to broadcast.")
+        return
 
-# ----------------------- Start Everything -----------------------
-if __name__ == "__main__":
-    threading.Thread(target=run_flask).start()
-    loop = asyncio.get_event_loop()
-    loop.create_task(auto_poster())
-    app.run()
+    if message.photo:
+        for user in context.bot.get_chat_members(PREMIUM_CHANNEL):
+            await context.bot.send_photo(chat_id=user.user.id, photo=message.photo[-1].file_id, caption=message.caption)
+    elif message.video:
+        for user in context.bot.get_chat_members(PREMIUM_CHANNEL):
+            await context.bot.send_video(chat_id=user.user.id, video=message.video.file_id, caption=message.caption)
+    else:
+        await update.message.reply_text("Only images and videos can be broadcasted.")
+
+async def trending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Only admin can use this command.")
+        return
+
+    message = update.message.reply_to_message
+    if not message:
+        await update.message.reply_text("Reply to a message to mark it as trending.")
+        return
+
+    # Mark the message as trending (you can store this in a database or a file)
+    with open('trending_videos.txt', 'a') as file:
+        file.write(f"{message.video.file_id}\n")
+
+    await update.message.reply_text("Video marked as trending.")
+
+def main() -> None:
+    application = Application.builder().token(API_TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button))
+    application.add_handler(MessageHandler(filters.Video, upload_video))
+    application.add_handler(CommandHandler("broadcast", broadcast))
+    application.add_handler(CommandHandler("trending", trending))
+
+    # Set up webhook
+    application.run_webhook(listen='0.0.0.0', port=8443, url_path=API_TOKEN, webhook_url=WEBHOOK_URL, cert='cert.pem', key='key.pem')
+
+if __name__ == '__main__':
+    main()
