@@ -25,6 +25,11 @@ SOURCE_CHANNEL = os.getenv('SOURCE_CHANNEL')  # Channel to fetch videos from
 ADMIN_ID = int(os.getenv('ADMIN_ID')) if os.getenv('ADMIN_ID') else None
 DAILY_LIMIT = int(os.getenv('DAILY_LIMIT', 5))
 
+# Webhook configuration for Koyeb
+WEBHOOK_URL = os.getenv('WEBHOOK_URL') # Koyeb will provide this as an environment variable
+PORT = int(os.getenv('PORT', 8000)) # Default Koyeb port is often 8000
+LISTEN_ADDRESS = '0.0.0.0' # Listen on all available interfaces
+
 # Store video file IDs and message IDs for deletion
 video_storage = []
 sent_messages = []  # Store message info for deletion
@@ -65,7 +70,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         [InlineKeyboardButton("Trending Videos", callback_data='trending_videos')]
     ]
     
-    # Add admin panel for admins
+    # Add admin panel for admins (only for the specified ADMIN_ID)
     if ADMIN_ID and user_id == ADMIN_ID:
         keyboard.append([InlineKeyboardButton("📡 Admin Panel", callback_data='admin_panel')])
     
@@ -116,10 +121,11 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             random_video = random.choice(video_storage)
             await query.edit_message_text(text="📹 Here is your random video:")
             
-            # Send video
+            # Send video with content protection
             sent_message = await context.bot.send_video(
                 chat_id=query.message.chat_id, 
-                video=random_video
+                video=random_video,
+                protect_content=True # Disable forwarding and saving
             )
             
             # Store message info for auto-deletion
@@ -171,7 +177,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 try:
                     sent_message = await context.bot.send_video(
                         chat_id=query.message.chat_id, 
-                        video=video_id
+                        video=video_id,
+                        protect_content=True # Disable forwarding and saving
                     )
                     
                     # Schedule deletion for trending videos too
@@ -499,7 +506,8 @@ async def handle_admin_content(update: Update, context: ContextTypes.DEFAULT_TYP
                         chat_id=user_id,
                         photo=photo.file_id,
                         caption=broadcast_caption,
-                        parse_mode=ParseMode.MARKDOWN
+                        parse_mode=ParseMode.MARKDOWN,
+                        protect_content=True # Disable forwarding and saving
                     )
                     success_count += 1
                 except TelegramError as e:
@@ -521,7 +529,8 @@ async def handle_admin_content(update: Update, context: ContextTypes.DEFAULT_TYP
                         chat_id=user_id,
                         video=video.file_id,
                         caption=broadcast_caption,
-                        parse_mode=ParseMode.MARKDOWN
+                        parse_mode=ParseMode.MARKDOWN,
+                        protect_content=True # Disable forwarding and saving
                     )
                     success_count += 1
                 except TelegramError as e:
@@ -628,13 +637,15 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 await context.bot.send_photo(
                     chat_id=user_id, 
                     photo=message.photo[-1].file_id, 
-                    caption=message.caption
+                    caption=message.caption,
+                    protect_content=True # Disable forwarding and saving
                 )
             elif message.video:
                 await context.bot.send_video(
                     chat_id=user_id, 
                     video=message.video.file_id, 
-                    caption=message.caption
+                    caption=message.caption,
+                    protect_content=True # Disable forwarding and saving
                 )
             else:
                 await context.bot.send_message(chat_id=user_id, text=message.text)
@@ -673,24 +684,21 @@ async def trending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Shows bot statistics for users or admin."""
-    if not ADMIN_ID or update.message.from_user.id != ADMIN_ID:
-        # Show user stats
-        user_id = update.message.from_user.id
-        user_data = context.bot_data.get('users', {}).get(user_id, {})
-        
-        daily_count = user_data.get('daily_count', 0)
-        uploaded_videos = user_data.get('uploaded_videos', 0)
-        remaining = max(0, DAILY_LIMIT - daily_count)
-        
-        stats_text = f"📊 Your Stats:\n"
-        stats_text += f"🆔 User ID: `{user_id}`\n"
-        stats_text += f"📹 Videos watched today: {daily_count}/{DAILY_LIMIT}\n"
-        stats_text += f"⏳ Remaining today: {remaining}\n"
-        stats_text += f"📤 Videos uploaded: {uploaded_videos}"
-        
-        await update.message.reply_text(stats_text, parse_mode=ParseMode.MARKDOWN)
-    else:
-        # Show admin stats
+    user_id = update.message.from_user.id
+    user_data = context.bot_data.get('users', {}).get(user_id, {})
+    
+    daily_count = user_data.get('daily_count', 0)
+    uploaded_videos = user_data.get('uploaded_videos', 0)
+    remaining = max(0, DAILY_LIMIT - daily_count)
+    
+    stats_text = f"📊 Your Stats:\n"
+    stats_text += f"🆔 User ID: `{user_id}`\n"
+    stats_text += f"📹 Videos watched today: {daily_count}/{DAILY_LIMIT}\n"
+    stats_text += f"⏳ Remaining today: {remaining}\n"
+    stats_text += f"📤 Videos uploaded: {uploaded_videos}"
+
+    if ADMIN_ID and user_id == ADMIN_ID:
+        # Admin-specific stats
         total_users = len(context.bot_data.get('users', {}))
         total_videos = len(video_storage)
         
@@ -699,13 +707,14 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             with open('trending_videos.txt', 'r') as file:
                 trending_count = len([line for line in file.readlines() if line.strip()])
         
-        stats_text = f"📊 Bot Statistics:\n"
+        stats_text += f"\n\n📊 **Bot Admin Statistics:**\n"
         stats_text += f"👥 Total users: {total_users}\n"
-        stats_text += f"📹 Total videos: {total_videos}\n"
+        stats_text += f"📹 Total videos in collection: {total_videos}\n"
         stats_text += f"🔥 Trending videos: {trending_count}\n"
-        stats_text += f"⚙️ Daily limit: {DAILY_LIMIT}"
-        
-        await update.message.reply_text(stats_text)
+        stats_text += f"⚙️ Global Daily Limit: {DAILY_LIMIT}\n"
+        stats_text += f"ℹ️ Your personal daily video usage is also capped at {DAILY_LIMIT}."
+
+    await update.message.reply_text(stats_text, parse_mode=ParseMode.MARKDOWN)
 
 async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles incoming photo messages, primarily for admin broadcast."""
@@ -722,13 +731,21 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("💬 I'm not configured to respond to general text messages yet. Please use the buttons or send a video!")
 
 
+# Global application instance for Gunicorn
+application = None
+
 def main() -> None:
     """Starts the bot and sets up all handlers."""
+    global application # Declare global to assign to it
+
     if not API_TOKEN:
         logger.error("TELEGRAM_API_TOKEN not found in environment variables")
         return
+    if not WEBHOOK_URL:
+        logger.error("WEBHOOK_URL not found in environment variables. Webhook deployment requires this.")
+        return
     
-    # Use the job_queue() method on the builder
+    # Build the application with JobQueue enabled
     application = Application.builder().token(API_TOKEN).job_queue(JobQueue()).build()
 
     # Add handlers
@@ -743,14 +760,21 @@ def main() -> None:
     application.add_handler(CommandHandler("trending", trending_command)) # Legacy trending command
 
     # Schedule cleanup job to run every hour
-    # The `first` parameter ensures it runs after 3600 seconds for the first time
     application.job_queue.run_repeating(cleanup_old_messages, interval=3600, first=3600)
 
-    # Run the bot in polling mode
-    logger.info("Starting bot in polling mode...")
+    # Start the bot in webhook mode
+    logger.info(f"Starting bot in webhook mode on {LISTEN_ADDRESS}:{PORT}...")
+    logger.info(f"Webhook URL: {WEBHOOK_URL}")
     logger.info("Auto-delete feature: Enabled (5 minutes for sent videos)")
     logger.info("Background cleanup: Enabled (every hour for message references)")
-    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+
+    # Set the webhook
+    application.run_webhook(
+        listen=LISTEN_ADDRESS,
+        port=PORT,
+        url_path="", # Empty url_path means the root path
+        webhook_url=WEBHOOK_URL
+    )
 
 if __name__ == '__main__':
     main()
