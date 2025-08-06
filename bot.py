@@ -728,11 +728,8 @@ def main() -> None:
         logger.error("TELEGRAM_API_TOKEN not found in environment variables")
         return
     
-    application = Application.builder().token(API_TOKEN).build()
-
-    # Initialize and attach JobQueue
-    application.job_queue = JobQueue()
-    application.job_queue.set_application(application)
+    # Use the job_queue() method on the builder
+    application = Application.builder().token(API_TOKEN).job_queue(JobQueue()).build()
 
     # Add handlers
     application.add_handler(CommandHandler("start", start))
