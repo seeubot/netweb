@@ -319,20 +319,9 @@ def main() -> None:
     application.add_handler(CommandHandler("broadcast", broadcast))
     application.add_handler(CommandHandler("trending", trending))
 
-    # Run the bot
-    if WEBHOOK_URL:
-        # Webhook mode for production
-        application.run_webhook(
-            listen='0.0.0.0', 
-            port=8443, 
-            url_path=API_TOKEN, 
-            webhook_url=WEBHOOK_URL,
-            # Remove cert and key parameters if not using self-signed certificates
-        )
-    else:
-        # Polling mode for development
-        logger.info("Starting bot in polling mode...")
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Run the bot in polling mode (works without webhook dependencies)
+    logger.info("Starting bot in polling mode...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()
