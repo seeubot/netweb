@@ -1,8 +1,2 @@
-pyrogram
-tgcrypto
-aiohttp
-beautifulsoup4
-flask
-lxml
-pyperclip
-requests
+python-telegram-bot
+python-dotenv
