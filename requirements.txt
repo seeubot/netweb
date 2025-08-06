@@ -1,4 +1,5 @@
-python-telegram-bot[job-queue,webhooks] # This will install the latest compatible version with both extras
+python-telegram-bot[job-queue,webhooks]
 python-dotenv
 gunicorn
+pymongo
 
