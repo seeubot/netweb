@@ -1,3 +1,4 @@
-python-telegram-bot[job-queue] # This will install the latest compatible version
-python-dotenv==1.0.0 # Keep this as is, or update if desired
+python-telegram-bot[job-queue]
+python-dotenv
+gunicorn
 
