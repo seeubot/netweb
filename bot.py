@@ -6,7 +6,7 @@ import asyncio
 from motor.motor_asyncio import AsyncIOMotorClient
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, JobQueue
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from telegram.error import TelegramError
 from dotenv import load_dotenv
 
@@ -24,18 +24,20 @@ logger = logging.getLogger(__name__)
 API_TOKEN = os.getenv('TELEGRAM_API_TOKEN')
 SOURCE_CHANNEL = os.getenv('SOURCE_CHANNEL')  # Channel to fetch videos from
 ADMIN_ID = int(os.getenv('ADMIN_ID')) if os.getenv('ADMIN_ID') else None
-DAILY_LIMIT = int(os.getenv('DAILY_LIMIT', 10))
+DAILY_LIMIT = int(os.getenv('DAILY_LIMIT', 5))
 MONGO_URI = "mongodb+srv://movie:movie@movie.tylkv.mongodb.net/?retryWrites=true&w=majority&appName=movie"
 DB_NAME = "telegram_bot_db"
+
+# Webhook configuration for Koyeb
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')
+PORT = int(os.getenv('PORT', 8000))
+LISTEN_ADDRESS = '0.0.0.0'
 
 # Global database client and collections
 db_client = None
 db = None
 users_collection = None
 videos_collection = None
-
-# Store temporary message IDs for deletion
-sent_messages = []
 
 async def connect_to_mongodb():
     """Connects to MongoDB and sets up global collections."""
@@ -95,10 +97,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if query.data == 'get_video':
         user_id = query.from_user.id
         
-        # Fetch user data from MongoDB
         user_doc = await users_collection.find_one({'user_id': user_id})
         
-        # Initialize user data in MongoDB if it doesn't exist
         if not user_doc:
             user_doc = {
                 'user_id': user_id,
@@ -108,7 +108,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             }
             await users_collection.insert_one(user_doc)
         
-        # Reset daily count if it's a new day
         if user_doc['last_reset'] != datetime.date.today().isoformat():
             await users_collection.update_one(
                 {'user_id': user_id},
@@ -117,7 +116,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             user_doc['daily_count'] = 0
             user_doc['last_reset'] = datetime.date.today().isoformat()
         
-        # Check daily limit
         if user_doc['daily_count'] >= DAILY_LIMIT:
             await query.edit_message_text(
                 text=f"⏰ You have reached your daily limit of {DAILY_LIMIT} videos.\n"
@@ -125,7 +123,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
-        # Fetch all video file IDs from the database
         all_videos = [doc['file_id'] async for doc in videos_collection.find({})]
         
         if not all_videos:
@@ -133,7 +130,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         try:
-            # Select random video
             random_video_id = random.choice(all_videos)
             await query.edit_message_text(text="📹 Here is your random video:")
             
@@ -149,13 +145,11 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 data={'chat_id': query.message.chat_id, 'message_id': sent_message.message_id}
             )
 
-            # Increment daily count in MongoDB
             await users_collection.update_one(
                 {'user_id': user_id},
                 {'$inc': {'daily_count': 1}}
             )
             
-            # Inform user about remaining videos
             remaining = DAILY_LIMIT - (user_doc['daily_count'] + 1)
             if remaining > 0:
                 await context.bot.send_message(
@@ -176,12 +170,11 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.edit_message_text(text="📤 Please send me the video you want to upload.")
 
     elif query.data == 'trending_videos':
-        # Fetch trending video IDs from MongoDB
         trending_videos = [doc['file_id'] async for doc in videos_collection.find({'is_trending': True})]
         
         if trending_videos:
             await query.edit_message_text(text="🔥 Here are the trending videos:")
-            for video_id in trending_videos[:3]:  # Limit to 3 trending videos
+            for video_id in trending_videos[:3]:
                 try:
                     sent_message = await context.bot.send_video(
                         chat_id=query.message.chat_id, 
@@ -400,20 +393,17 @@ async def upload_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     
     video = update.message.video
     if video:
-        # Check if video already exists in the database to prevent duplicates
         existing_video = await videos_collection.find_one({'file_id': video.file_id})
         if existing_video:
             await update.message.reply_text("This video has already been uploaded.")
             return
 
-        # Insert video file ID into MongoDB
         await videos_collection.insert_one({
             'file_id': video.file_id,
             'is_trending': False,
             'upload_timestamp': datetime.datetime.now()
         })
         
-        # Update user's uploaded video count in MongoDB
         await users_collection.update_one(
             {'user_id': user_id},
             {'$inc': {'uploaded_videos': 1}},
@@ -446,11 +436,10 @@ async def handle_admin_content(update: Update, context: ContextTypes.DEFAULT_TYP
         video = update.message.video
         if video:
             try:
-                # Find the video in the collection and mark it as trending
                 result = await videos_collection.update_one(
                     {'file_id': video.file_id},
                     {'$set': {'is_trending': True}},
-                    upsert=True # If video not found, add it and mark as trending
+                    upsert=True
                 )
                 
                 if result.matched_count > 0 or result.upserted_id:
@@ -469,7 +458,6 @@ async def handle_admin_content(update: Update, context: ContextTypes.DEFAULT_TYP
     if not broadcast_mode:
         return
     
-    # Get all user IDs from MongoDB
     all_users = [doc['user_id'] async for doc in users_collection.find({}, {'user_id': 1})]
     
     if not all_users:
@@ -660,12 +648,18 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
     
-    logger.info(f"Starting bot in webhook mode on {os.getenv('LISTEN_ADDRESS', '0.0.0.0')}:{os.getenv('PORT', 8000')}...")
+    application.job_queue.run_repeating(
+        lambda context: None,  # Placeholder for an actual cleanup job if needed
+        interval=3600,
+        first=3600,
+    )
+    
+    logger.info(f"Starting bot in webhook mode on {LISTEN_ADDRESS}:{PORT}...")
     logger.info(f"Webhook URL: {WEBHOOK_URL}")
 
     application.run_webhook(
-        listen=os.getenv('LISTEN_ADDRESS', '0.0.0.0'),
-        port=int(os.getenv('PORT', 8000)),
+        listen=LISTEN_ADDRESS,
+        port=PORT,
         url_path="",
         webhook_url=WEBHOOK_URL
     )
