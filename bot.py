@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 API_TOKEN = os.getenv('TELEGRAM_API_TOKEN')
 SOURCE_CHANNEL = os.getenv('SOURCE_CHANNEL')  # Channel to fetch videos from
 ADMIN_ID = int(os.getenv('ADMIN_ID')) if os.getenv('ADMIN_ID') else None
-DAILY_LIMIT = int(os.getenv('DAILY_LIMIT', 5))
+DAILY_LIMIT = int(os.getenv('DAILY_LIMIT', 10))
 MONGO_URI = "mongodb+srv://movie:movie@movie.tylkv.mongodb.net/?retryWrites=true&w=majority&appName=movie"
 DB_NAME = "telegram_bot_db"
 
@@ -44,12 +44,16 @@ async def connect_to_mongodb():
     global db_client, db, users_collection, videos_collection
     try:
         db_client = AsyncIOMotorClient(MONGO_URI)
+        # Test the connection
+        await db_client.admin.command('ping')
         db = db_client[DB_NAME]
         users_collection = db['users']
         videos_collection = db['videos']
         logger.info("Successfully connected to MongoDB.")
+        return True
     except Exception as e:
         logger.error(f"Failed to connect to MongoDB: {e}")
+        return False
 
 async def fetch_videos_from_channel(context: ContextTypes.DEFAULT_TYPE):
     """
@@ -97,39 +101,45 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if query.data == 'get_video':
         user_id = query.from_user.id
         
-        user_doc = await users_collection.find_one({'user_id': user_id})
-        
-        if not user_doc:
-            user_doc = {
-                'user_id': user_id,
-                'daily_count': 0,
-                'last_reset': datetime.date.today().isoformat(),
-                'uploaded_videos': 0
-            }
-            await users_collection.insert_one(user_doc)
-        
-        if user_doc['last_reset'] != datetime.date.today().isoformat():
-            await users_collection.update_one(
-                {'user_id': user_id},
-                {'$set': {'daily_count': 0, 'last_reset': datetime.date.today().isoformat()}}
-            )
-            user_doc['daily_count'] = 0
-            user_doc['last_reset'] = datetime.date.today().isoformat()
-        
-        if user_doc['daily_count'] >= DAILY_LIMIT:
-            await query.edit_message_text(
-                text=f"⏰ You have reached your daily limit of {DAILY_LIMIT} videos.\n"
-                     f"Please try again tomorrow!"
-            )
-            return
-
-        all_videos = [doc['file_id'] async for doc in videos_collection.find({})]
-        
-        if not all_videos:
-            await query.edit_message_text(text="📹 No videos available at the moment.\nPlease upload some videos first!")
-            return
-
         try:
+            user_doc = await users_collection.find_one({'user_id': user_id})
+            
+            if not user_doc:
+                user_doc = {
+                    'user_id': user_id,
+                    'daily_count': 0,
+                    'last_reset': datetime.date.today().isoformat(),
+                    'uploaded_videos': 0
+                }
+                await users_collection.insert_one(user_doc)
+            
+            # Reset daily count if it's a new day
+            if user_doc['last_reset'] != datetime.date.today().isoformat():
+                await users_collection.update_one(
+                    {'user_id': user_id},
+                    {'$set': {'daily_count': 0, 'last_reset': datetime.date.today().isoformat()}}
+                )
+                user_doc['daily_count'] = 0
+                user_doc['last_reset'] = datetime.date.today().isoformat()
+            
+            # Check daily limit
+            if user_doc['daily_count'] >= DAILY_LIMIT:
+                await query.edit_message_text(
+                    text=f"⏰ You have reached your daily limit of {DAILY_LIMIT} videos.\n"
+                         f"Please try again tomorrow!"
+                )
+                return
+
+            # Get all videos from collection
+            all_videos = []
+            async for doc in videos_collection.find({}):
+                all_videos.append(doc['file_id'])
+            
+            if not all_videos:
+                await query.edit_message_text(text="📹 No videos available at the moment.\nPlease upload some videos first!")
+                return
+
+            # Send random video
             random_video_id = random.choice(all_videos)
             await query.edit_message_text(text="📹 Here is your random video:")
             
@@ -139,12 +149,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 protect_content=True
             )
             
+            # Schedule message deletion after 5 minutes
             context.job_queue.run_once(
                 delete_message,
                 300,
                 data={'chat_id': query.message.chat_id, 'message_id': sent_message.message_id}
             )
 
+            # Update user's daily count
             await users_collection.update_one(
                 {'user_id': user_id},
                 {'$inc': {'daily_count': 1}}
@@ -163,34 +175,40 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
                 
         except Exception as e:
-            logger.error(f"Error sending video: {e}")
-            await query.edit_message_text(text="❌ Sorry, there was an error sending the video.")
+            logger.error(f"Error in get_video: {e}")
+            await query.edit_message_text(text="❌ Sorry, there was an error processing your request.")
 
     elif query.data == 'upload_video':
         await query.edit_message_text(text="📤 Please send me the video you want to upload.")
 
     elif query.data == 'trending_videos':
-        trending_videos = [doc['file_id'] async for doc in videos_collection.find({'is_trending': True})]
-        
-        if trending_videos:
-            await query.edit_message_text(text="🔥 Here are the trending videos:")
-            for video_id in trending_videos[:3]:
-                try:
-                    sent_message = await context.bot.send_video(
-                        chat_id=query.message.chat_id, 
-                        video=video_id,
-                        protect_content=True
-                    )
-                    
-                    context.job_queue.run_once(
-                        delete_message,
-                        300,
-                        data={'chat_id': query.message.chat_id, 'message_id': sent_message.message_id}
-                    )
-                except TelegramError as e:
-                    logger.error(f"Error sending trending video {video_id}: {e}")
-        else:
-            await query.edit_message_text(text="📹 No trending videos available at the moment.")
+        try:
+            trending_videos = []
+            async for doc in videos_collection.find({'is_trending': True}):
+                trending_videos.append(doc['file_id'])
+            
+            if trending_videos:
+                await query.edit_message_text(text="🔥 Here are the trending videos:")
+                for video_id in trending_videos[:3]:  # Limit to 3 trending videos
+                    try:
+                        sent_message = await context.bot.send_video(
+                            chat_id=query.message.chat_id, 
+                            video=video_id,
+                            protect_content=True
+                        )
+                        
+                        context.job_queue.run_once(
+                            delete_message,
+                            300,
+                            data={'chat_id': query.message.chat_id, 'message_id': sent_message.message_id}
+                        )
+                    except TelegramError as e:
+                        logger.error(f"Error sending trending video {video_id}: {e}")
+            else:
+                await query.edit_message_text(text="📹 No trending videos available at the moment.")
+        except Exception as e:
+            logger.error(f"Error in trending_videos: {e}")
+            await query.edit_message_text(text="❌ Error loading trending videos.")
 
     elif query.data == 'admin_panel':
         if not ADMIN_ID or query.from_user.id != ADMIN_ID:
@@ -277,55 +295,63 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await query.edit_message_text(text="❌ Access denied.")
             return
             
-        total_users = await users_collection.count_documents({})
-        total_videos = await videos_collection.count_documents({})
-        trending_count = await videos_collection.count_documents({'is_trending': True})
+        try:
+            total_users = await users_collection.count_documents({})
+            total_videos = await videos_collection.count_documents({})
+            trending_count = await videos_collection.count_documents({'is_trending': True})
 
-        today_iso = datetime.date.today().isoformat()
-        active_today = await users_collection.count_documents({
-            'last_reset': today_iso,
-            'daily_count': {'$gt': 0}
-        })
-        
-        stats_text = f"📊 **Bot Statistics**\n\n"
-        stats_text += f"👥 Total users: {total_users}\n"
-        stats_text += f"🔥 Active today: {active_today}\n"
-        stats_text += f"📹 Total videos: {total_videos}\n"
-        stats_text += f"⭐ Trending videos: {trending_count}\n"
-        stats_text += f"⚙️ Daily limit: {DAILY_LIMIT}\n"
-        stats_text += f"🤖 Auto-delete: 5 minutes"
-        
-        back_keyboard = [[InlineKeyboardButton("🔙 Back to Admin", callback_data='admin_panel')]]
-        reply_markup = InlineKeyboardMarkup(back_keyboard)
-        
-        await query.edit_message_text(
-            text=stats_text,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
-        )
+            today_iso = datetime.date.today().isoformat()
+            active_today = await users_collection.count_documents({
+                'last_reset': today_iso,
+                'daily_count': {'$gt': 0}
+            })
+            
+            stats_text = f"📊 **Bot Statistics**\n\n"
+            stats_text += f"👥 Total users: {total_users}\n"
+            stats_text += f"🔥 Active today: {active_today}\n"
+            stats_text += f"📹 Total videos: {total_videos}\n"
+            stats_text += f"⭐ Trending videos: {trending_count}\n"
+            stats_text += f"⚙️ Daily limit: {DAILY_LIMIT}\n"
+            stats_text += f"🤖 Auto-delete: 5 minutes"
+            
+            back_keyboard = [[InlineKeyboardButton("🔙 Back to Admin", callback_data='admin_panel')]]
+            reply_markup = InlineKeyboardMarkup(back_keyboard)
+            
+            await query.edit_message_text(
+                text=stats_text,
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as e:
+            logger.error(f"Error in admin_stats: {e}")
+            await query.edit_message_text(text="❌ Error loading statistics.")
 
     elif query.data == 'manage_trending':
         if not ADMIN_ID or query.from_user.id != ADMIN_ID:
             await query.edit_message_text(text="❌ Access denied.")
             return
             
-        trending_count = await videos_collection.count_documents({'is_trending': True})
-        
-        trending_keyboard = [
-            [InlineKeyboardButton("➕ Add Trending", callback_data='add_trending')],
-            [InlineKeyboardButton("🗑 Clear All", callback_data='clear_trending')],
-            [InlineKeyboardButton("🔙 Back to Admin", callback_data='admin_panel')]
-        ]
-        reply_markup = InlineKeyboardMarkup(trending_keyboard)
-        
-        await query.edit_message_text(
-            text=f"🔥 **Trending Management**\n\n"
-                 f"Current trending videos: {trending_count}\n\n"
-                 f"• Add new trending videos\n"
-                 f"• Clear all trending videos",
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
-        )
+        try:
+            trending_count = await videos_collection.count_documents({'is_trending': True})
+            
+            trending_keyboard = [
+                [InlineKeyboardButton("➕ Add Trending", callback_data='add_trending')],
+                [InlineKeyboardButton("🗑 Clear All", callback_data='clear_trending')],
+                [InlineKeyboardButton("🔙 Back to Admin", callback_data='admin_panel')]
+            ]
+            reply_markup = InlineKeyboardMarkup(trending_keyboard)
+            
+            await query.edit_message_text(
+                text=f"🔥 **Trending Management**\n\n"
+                     f"Current trending videos: {trending_count}\n\n"
+                     f"• Add new trending videos\n"
+                     f"• Clear all trending videos",
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as e:
+            logger.error(f"Error in manage_trending: {e}")
+            await query.edit_message_text(text="❌ Error loading trending management.")
 
     elif query.data == 'add_trending':
         if not ADMIN_ID or query.from_user.id != ADMIN_ID:
@@ -386,6 +412,7 @@ async def upload_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     
     user_id = update.message.from_user.id
     
+    # Handle admin operations first
     if ADMIN_ID and user_id == ADMIN_ID:
         if context.user_data.get('broadcast_mode') or context.user_data.get('trending_mode'):
             await handle_admin_content(update, context)
@@ -393,34 +420,44 @@ async def upload_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     
     video = update.message.video
     if video:
-        existing_video = await videos_collection.find_one({'file_id': video.file_id})
-        if existing_video:
-            await update.message.reply_text("This video has already been uploaded.")
-            return
+        try:
+            # Check if video already exists
+            existing_video = await videos_collection.find_one({'file_id': video.file_id})
+            if existing_video:
+                await update.message.reply_text("This video has already been uploaded.")
+                return
 
-        await videos_collection.insert_one({
-            'file_id': video.file_id,
-            'is_trending': False,
-            'upload_timestamp': datetime.datetime.now()
-        })
-        
-        await users_collection.update_one(
-            {'user_id': user_id},
-            {'$inc': {'uploaded_videos': 1}},
-            upsert=True
-        )
-        
-        total_videos = await videos_collection.count_documents({})
-        user_doc = await users_collection.find_one({'user_id': user_id})
-        uploaded_videos = user_doc['uploaded_videos'] if user_doc else 0
+            # Add video to collection
+            await videos_collection.insert_one({
+                'file_id': video.file_id,
+                'is_trending': False,
+                'upload_timestamp': datetime.datetime.now(),
+                'uploaded_by': user_id
+            })
+            
+            # Update user's upload count
+            await users_collection.update_one(
+                {'user_id': user_id},
+                {'$inc': {'uploaded_videos': 1}},
+                upsert=True
+            )
+            
+            # Get counts for response
+            total_videos = await videos_collection.count_documents({})
+            user_doc = await users_collection.find_one({'user_id': user_id})
+            uploaded_videos = user_doc['uploaded_videos'] if user_doc else 0
 
-        await update.message.reply_text(
-            f"✅ Video uploaded successfully!\n"
-            f"📊 Total videos uploaded by you: {uploaded_videos}\n"
-            f"📹 Total videos in collection: {total_videos}"
-        )
-        
-        logger.info(f"User {user_id} uploaded a video. Total videos: {total_videos}")
+            await update.message.reply_text(
+                f"✅ Video uploaded successfully!\n"
+                f"📊 Total videos uploaded by you: {uploaded_videos}\n"
+                f"📹 Total videos in collection: {total_videos}"
+            )
+            
+            logger.info(f"User {user_id} uploaded a video. Total videos: {total_videos}")
+            
+        except Exception as e:
+            logger.error(f"Error uploading video: {e}")
+            await update.message.reply_text("❌ Sorry, there was an error uploading your video.")
     else:
         await update.message.reply_text("❌ Please send a valid video file.")
 
@@ -432,21 +469,26 @@ async def handle_admin_content(update: Update, context: ContextTypes.DEFAULT_TYP
     broadcast_mode = context.user_data.get('broadcast_mode')
     trending_mode = context.user_data.get('trending_mode')
     
+    # Handle trending mode
     if trending_mode:
         video = update.message.video
         if video:
             try:
+                # Add or update video as trending
                 result = await videos_collection.update_one(
                     {'file_id': video.file_id},
-                    {'$set': {'is_trending': True}},
+                    {
+                        '$set': {
+                            'is_trending': True,
+                            'upload_timestamp': datetime.datetime.now(),
+                            'uploaded_by': update.message.from_user.id
+                        }
+                    },
                     upsert=True
                 )
                 
-                if result.matched_count > 0 or result.upserted_id:
-                    await update.message.reply_text("✅ Video added to trending list successfully!")
-                    context.user_data.pop('trending_mode', None)
-                else:
-                    await update.message.reply_text("❌ Error adding video to trending list.")
+                await update.message.reply_text("✅ Video added to trending list successfully!")
+                context.user_data.pop('trending_mode', None)
                 
             except Exception as e:
                 logger.error(f"Error adding trending video: {e}")
@@ -455,23 +497,28 @@ async def handle_admin_content(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("❌ Please send a video file.")
         return
     
+    # Handle broadcast mode
     if not broadcast_mode:
         return
     
-    all_users = [doc['user_id'] async for doc in users_collection.find({}, {'user_id': 1})]
-    
-    if not all_users:
-        await update.message.reply_text("❌ No users found to broadcast to.")
-        return
-    
-    success_count = 0
-    failed_count = 0
-    
-    progress_msg = await update.message.reply_text(
-        f"📡 Starting broadcast to {len(all_users)} users...\n⏳ Please wait..."
-    )
-    
     try:
+        # Get all users for broadcasting
+        all_users = []
+        async for doc in users_collection.find({}, {'user_id': 1}):
+            all_users.append(doc['user_id'])
+        
+        if not all_users:
+            await update.message.reply_text("❌ No users found to broadcast to.")
+            return
+        
+        success_count = 0
+        failed_count = 0
+        
+        progress_msg = await update.message.reply_text(
+            f"📡 Starting broadcast to {len(all_users)} users...\n⏳ Please wait..."
+        )
+        
+        # Handle different broadcast types
         if broadcast_mode == 'text':
             text_to_send = update.message.text
             
@@ -487,7 +534,7 @@ async def handle_admin_content(update: Update, context: ContextTypes.DEFAULT_TYP
                     logger.error(f"Error broadcasting text to user {user_id}: {e}")
                     failed_count += 1
                 
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.05)  # Rate limiting
         
         elif broadcast_mode == 'image' and update.message.photo:
             photo = update.message.photo[-1]
@@ -538,6 +585,7 @@ async def handle_admin_content(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
         
+        # Update progress message with results
         await progress_msg.edit_text(
             f"📡 **Broadcast Completed!**\n\n"
             f"✅ Successfully sent: {success_count}\n"
@@ -550,7 +598,7 @@ async def handle_admin_content(update: Update, context: ContextTypes.DEFAULT_TYP
         
     except Exception as e:
         logger.error(f"Error during broadcast: {e}")
-        await progress_msg.edit_text(
+        await update.message.reply_text(
             f"❌ **Broadcast Error**\n\n"
             f"An error occurred during broadcast: {str(e)}"
         )
@@ -585,31 +633,37 @@ async def delete_message(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Shows bot statistics for users or admin."""
     user_id = update.message.from_user.id
-    user_doc = await users_collection.find_one({'user_id': user_id})
     
-    daily_count = user_doc['daily_count'] if user_doc else 0
-    uploaded_videos = user_doc['uploaded_videos'] if user_doc else 0
-    remaining = max(0, DAILY_LIMIT - daily_count)
-    
-    stats_text = f"📊 Your Stats:\n"
-    stats_text += f"🆔 User ID: `{user_id}`\n"
-    stats_text += f"📹 Videos watched today: {daily_count}/{DAILY_LIMIT}\n"
-    stats_text += f"⏳ Remaining today: {remaining}\n"
-    stats_text += f"📤 Videos uploaded: {uploaded_videos}"
-
-    if ADMIN_ID and user_id == ADMIN_ID:
-        total_users = await users_collection.count_documents({})
-        total_videos = await videos_collection.count_documents({})
-        trending_count = await videos_collection.count_documents({'is_trending': True})
+    try:
+        user_doc = await users_collection.find_one({'user_id': user_id})
         
-        stats_text += f"\n\n📊 **Bot Admin Statistics:**\n"
-        stats_text += f"👥 Total users: {total_users}\n"
-        stats_text += f"📹 Total videos in collection: {total_videos}\n"
-        stats_text += f"🔥 Trending videos: {trending_count}\n"
-        stats_text += f"⚙️ Global Daily Limit: {DAILY_LIMIT}\n"
-        stats_text += f"ℹ️ Your personal daily video usage is also capped at {DAILY_LIMIT}."
+        daily_count = user_doc['daily_count'] if user_doc else 0
+        uploaded_videos = user_doc['uploaded_videos'] if user_doc else 0
+        remaining = max(0, DAILY_LIMIT - daily_count)
+        
+        stats_text = f"📊 Your Stats:\n"
+        stats_text += f"🆔 User ID: `{user_id}`\n"
+        stats_text += f"📹 Videos watched today: {daily_count}/{DAILY_LIMIT}\n"
+        stats_text += f"⏳ Remaining today: {remaining}\n"
+        stats_text += f"📤 Videos uploaded: {uploaded_videos}"
 
-    await update.message.reply_text(stats_text, parse_mode=ParseMode.MARKDOWN)
+        if ADMIN_ID and user_id == ADMIN_ID:
+            total_users = await users_collection.count_documents({})
+            total_videos = await videos_collection.count_documents({})
+            trending_count = await videos_collection.count_documents({'is_trending': True})
+            
+            stats_text += f"\n\n📊 **Bot Admin Statistics:**\n"
+            stats_text += f"👥 Total users: {total_users}\n"
+            stats_text += f"📹 Total videos in collection: {total_videos}\n"
+            stats_text += f"🔥 Trending videos: {trending_count}\n"
+            stats_text += f"⚙️ Global Daily Limit: {DAILY_LIMIT}\n"
+            stats_text += f"ℹ️ Your personal daily video usage is also capped at {DAILY_LIMIT}."
+
+        await update.message.reply_text(stats_text, parse_mode=ParseMode.MARKDOWN)
+        
+    except Exception as e:
+        logger.error(f"Error in stats: {e}")
+        await update.message.reply_text("❌ Error loading statistics.")
 
 async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles incoming photo messages, primarily for admin broadcast."""
@@ -627,7 +681,12 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def post_init(application: Application) -> None:
     """Post-initialization hook to connect to MongoDB."""
-    await connect_to_mongodb()
+    connection_success = await connect_to_mongodb()
+    if not connection_success:
+        logger.error("Failed to connect to MongoDB. Bot may not function properly.")
+        # You could decide to exit here if MongoDB is critical
+        # import sys
+        # sys.exit(1)
 
 def main() -> None:
     """Starts the bot and sets up all handlers."""
@@ -638,25 +697,33 @@ def main() -> None:
         logger.error("WEBHOOK_URL not found in environment variables. Webhook deployment requires this.")
         return
     
+    # Create application with post_init hook
     application = Application.builder().token(API_TOKEN).post_init(post_init).build()
 
+    # Add command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("stats", stats))
     application.add_handler(CommandHandler("cancel", cancel_operation))
+    
+    # Add callback query handler
     application.add_handler(CallbackQueryHandler(button))
+    
+    # Add message handlers
     application.add_handler(MessageHandler(filters.VIDEO, upload_video))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
     
+    # Add a periodic cleanup job (optional)
     application.job_queue.run_repeating(
-        lambda context: None,  # Placeholder for an actual cleanup job if needed
-        interval=3600,
+        lambda context: logger.info("Bot is running..."),
+        interval=3600,  # Every hour
         first=3600,
     )
     
     logger.info(f"Starting bot in webhook mode on {LISTEN_ADDRESS}:{PORT}...")
     logger.info(f"Webhook URL: {WEBHOOK_URL}")
 
+    # Start webhook
     application.run_webhook(
         listen=LISTEN_ADDRESS,
         port=PORT,
@@ -666,4 +733,3 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-
