@@ -4,6 +4,8 @@ import random
 import logging
 import datetime
 import asyncio
+import hashlib
+import base64
 from typing import Dict, Any, Optional
 from motor.motor_asyncio import AsyncIOMotorClient
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -27,8 +29,7 @@ API_TOKEN = os.getenv('TELEGRAM_API_TOKEN')
 SOURCE_CHANNEL = os.getenv('SOURCE_CHANNEL')  # Channel to fetch videos from
 ADMIN_ID = int(os.getenv('ADMIN_ID')) if os.getenv('ADMIN_ID') else None
 DAILY_LIMIT = int(os.getenv('DAILY_LIMIT', 5))
-FILE_DAILY_LIMIT = int(os.getenv('FILE_DAILY_LIMIT', 3))  # Separate limit for files
-MAX_FILE_SIZE = int(os.getenv('MAX_FILE_SIZE', 50)) * 1024 * 1024  # 50MB default
+BOT_USERNAME = os.getenv('BOT_USERNAME', 'your_bot_username')  # Bot username for URL generation
 MONGO_URI = "mongodb+srv://movie:movie@movie.tylkv.mongodb.net/?retryWrites=true&w=majority&appName=movie"
 DB_NAME = "telegram_bot_db"
 
@@ -42,11 +43,11 @@ db_client = None
 db = None
 users_collection = None
 videos_collection = None
-files_collection = None
+shared_videos_collection = None  # New collection for shared video URLs
 
 async def connect_to_mongodb():
     """Connects to MongoDB and sets up global collections."""
-    global db_client, db, users_collection, videos_collection, files_collection
+    global db_client, db, users_collection, videos_collection, shared_videos_collection
     try:
         db_client = AsyncIOMotorClient(MONGO_URI)
         # Test the connection
@@ -54,7 +55,7 @@ async def connect_to_mongodb():
         db = db_client[DB_NAME]
         users_collection = db['users']
         videos_collection = db['videos']
-        files_collection = db['files']  # New collection for files
+        shared_videos_collection = db['shared_videos']  # For URL sharing
         logger.info("Successfully connected to MongoDB.")
         return True
     except Exception as e:
@@ -76,41 +77,64 @@ async def fetch_videos_from_channel(context: ContextTypes.DEFAULT_TYPE):
     except TelegramError as e:
         logger.error(f"Error accessing source channel {SOURCE_CHANNEL}: {e}")
 
-def format_file_size(size_bytes):
-    """Convert bytes to human readable format."""
-    if size_bytes == 0:
-        return "0B"
-    size_names = ["B", "KB", "MB", "GB"]
-    import math
-    i = int(math.floor(math.log(size_bytes, 1024)))
-    p = math.pow(1024, i)
-    s = round(size_bytes / p, 2)
-    return f"{s} {size_names[i]}"
+def generate_share_token(video_id: str, user_id: int) -> str:
+    """Generate a unique share token for a video."""
+    timestamp = str(int(datetime.datetime.now().timestamp()))
+    data = f"{video_id}_{user_id}_{timestamp}"
+    token = hashlib.sha256(data.encode()).hexdigest()[:16]
+    return token
+
+async def create_share_url(video_doc: dict, user_id: int) -> str:
+    """Create a shareable URL for a video."""
+    try:
+        # Generate unique token
+        share_token = generate_share_token(str(video_doc['_id']), user_id)
+        
+        # Store share data in database
+        share_data = {
+            'token': share_token,
+            'video_id': video_doc['_id'],
+            'file_id': video_doc['file_id'],
+            'shared_by': user_id,
+            'created_at': datetime.datetime.now(),
+            'access_count': 0,
+            'expires_at': datetime.datetime.now() + datetime.timedelta(days=7)  # 7 days expiry
+        }
+        
+        await shared_videos_collection.insert_one(share_data)
+        
+        # Generate URL
+        share_url = f"https://t.me/{BOT_USERNAME}?start=share_{share_token}"
+        return share_url
+        
+    except Exception as e:
+        logger.error(f"Error creating share URL: {e}")
+        return None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message and main menu keyboard to the user."""
     user = update.effective_user
     user_id = user.id
     
+    # Check if this is a shared video access
+    if context.args and context.args[0].startswith('share_'):
+        await handle_shared_video_access(update, context, context.args[0])
+        return
+    
     welcome_message = f"Welcome, {user.mention_markdown_v2()}\\!\n\n"
     welcome_message += f"Your User ID: `{user_id}`\n\n"
-    welcome_message += "This bot shares random videos and files from our collection\\.\n"
-    welcome_message += "Use the buttons below to get content or upload new ones\\."
+    welcome_message += "This bot shares random videos from our collection\\.\n"
+    welcome_message += "Use the buttons below to get videos or upload new ones\\."
 
     keyboard = [
         [
             InlineKeyboardButton("🎥 Random Video", callback_data='get_video'),
-            InlineKeyboardButton("📁 Random File", callback_data='get_file')
+            InlineKeyboardButton("🔗 Get Share Link", callback_data='get_share_link')
         ],
         [
             InlineKeyboardButton("📤 Upload Video", callback_data='upload_video'),
-            InlineKeyboardButton("📎 Upload File", callback_data='upload_file')
-        ],
-        [
-            InlineKeyboardButton("🔥 Trending Videos", callback_data='trending_videos'),
-            InlineKeyboardButton("📊 Popular Files", callback_data='popular_files')
-        ],
-        [InlineKeyboardButton("📋 Browse Categories", callback_data='browse_categories')]
+            InlineKeyboardButton("🔥 Trending Videos", callback_data='trending_videos')
+        ]
     ]
     
     if ADMIN_ID and user_id == ADMIN_ID:
@@ -120,42 +144,86 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await update.message.reply_text(welcome_message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
 
+async def handle_shared_video_access(update: Update, context: ContextTypes.DEFAULT_TYPE, share_param: str) -> None:
+    """Handle access to shared videos via URL."""
+    try:
+        share_token = share_param.replace('share_', '')
+        
+        # Find the shared video
+        share_doc = await shared_videos_collection.find_one({
+            'token': share_token,
+            'expires_at': {'$gt': datetime.datetime.now()}
+        })
+        
+        if not share_doc:
+            await update.message.reply_text(
+                "❌ **Invalid or Expired Link**\n\n"
+                "This video share link is either invalid or has expired.\n"
+                "Share links expire after 7 days.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        # Increment access count
+        await shared_videos_collection.update_one(
+            {'token': share_token},
+            {'$inc': {'access_count': 1}}
+        )
+        
+        # Send the video
+        await update.message.reply_text("🎥 **Shared Video:**")
+        sent_message = await context.bot.send_video(
+            chat_id=update.message.chat_id,
+            video=share_doc['file_id'],
+            caption=f"📤 Shared by user {share_doc['shared_by']}\n🔢 Access count: {share_doc['access_count'] + 1}",
+            protect_content=True
+        )
+        
+        # Schedule message deletion after 5 minutes
+        context.job_queue.run_once(
+            delete_message,
+            300,
+            data={'chat_id': update.message.chat_id, 'message_id': sent_message.message_id}
+        )
+        
+        # Show main menu after sharing
+        keyboard = [
+            [
+                InlineKeyboardButton("🎥 Random Video", callback_data='get_video'),
+                InlineKeyboardButton("🔗 Get Share Link", callback_data='get_share_link')
+            ],
+            [
+                InlineKeyboardButton("📤 Upload Video", callback_data='upload_video'),
+                InlineKeyboardButton("🔥 Trending Videos", callback_data='trending_videos')
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "✅ Enjoy the video! Use the buttons below for more options:",
+            reply_markup=reply_markup
+        )
+        
+    except Exception as e:
+        logger.error(f"Error handling shared video access: {e}")
+        await update.message.reply_text("❌ Error accessing shared video.")
+
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles button presses from the inline keyboard."""
     query = update.callback_query
     await query.answer()
 
     if query.data == 'get_video':
-        await handle_get_content(query, context, 'video')
+        await handle_get_video(query, context)
     
-    elif query.data == 'get_file':
-        await handle_get_content(query, context, 'file')
+    elif query.data == 'get_share_link':
+        await handle_get_share_link(query, context)
 
     elif query.data == 'upload_video':
         await query.edit_message_text(text="🎥 Please send me the video you want to upload.")
 
-    elif query.data == 'upload_file':
-        await query.edit_message_text(
-            text=f"📎 **File Upload**\n\n"
-                 f"Please send me the file you want to share.\n\n"
-                 f"📏 **Limits:**\n"
-                 f"• Maximum file size: {format_file_size(MAX_FILE_SIZE)}\n"
-                 f"• Daily file downloads: {FILE_DAILY_LIMIT}\n\n"
-                 f"✅ **Supported types:** Documents, Images, Audio, Archives, etc."
-        )
-
     elif query.data == 'trending_videos':
-        await handle_trending_content(query, context, 'video')
-    
-    elif query.data == 'popular_files':
-        await handle_trending_content(query, context, 'file')
-
-    elif query.data == 'browse_categories':
-        await handle_browse_categories(query, context)
-
-    elif query.data.startswith('category_'):
-        category = query.data.replace('category_', '')
-        await handle_category_files(query, context, category)
+        await handle_trending_videos(query, context)
 
     elif query.data == 'admin_panel':
         if not ADMIN_ID or query.from_user.id != ADMIN_ID:
@@ -169,7 +237,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             ],
             [
                 InlineKeyboardButton("🔥 Manage Trending", callback_data='manage_trending'),
-                InlineKeyboardButton("📁 Manage Files", callback_data='manage_files')
+                InlineKeyboardButton("🔗 Share Statistics", callback_data='share_stats')
             ],
             [InlineKeyboardButton("🔙 Back to Main", callback_data='back_to_main')]
         ]
@@ -181,92 +249,51 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             parse_mode=ParseMode.MARKDOWN
         )
 
-    elif query.data == 'manage_files':
+    elif query.data == 'manage_trending':
         if not ADMIN_ID or query.from_user.id != ADMIN_ID:
             await query.edit_message_text(text="❌ Access denied.")
             return
         
-        try:
-            total_files = await files_collection.count_documents({})
-            popular_files = await files_collection.count_documents({'is_popular': True})
-            
-            file_keyboard = [
-                [InlineKeyboardButton("⭐ Add Popular", callback_data='add_popular_file')],
-                [InlineKeyboardButton("🗑 Clear Popular", callback_data='clear_popular_files')],
-                [InlineKeyboardButton("📋 File Stats", callback_data='file_stats')],
-                [InlineKeyboardButton("🔙 Back to Admin", callback_data='admin_panel')]
-            ]
-            reply_markup = InlineKeyboardMarkup(file_keyboard)
-            
-            await query.edit_message_text(
-                text=f"📁 **File Management**\n\n"
-                     f"📊 Total files: {total_files}\n"
-                     f"⭐ Popular files: {popular_files}\n\n"
-                     f"Choose an action:",
-                reply_markup=reply_markup,
-                parse_mode=ParseMode.MARKDOWN
-            )
-        except Exception as e:
-            logger.error(f"Error in manage_files: {e}")
-            await query.edit_message_text(text="❌ Error loading file management.")
-
-    elif query.data == 'add_popular_file':
-        if not ADMIN_ID or query.from_user.id != ADMIN_ID:
-            await query.edit_message_text(text="❌ Access denied.")
-            return
-        
-        context.user_data['popular_file_mode'] = True
+        context.user_data['trending_mode'] = True
         await query.edit_message_text(
-            text="⭐ **Add Popular File**\n\n"
-                 "Send me a file to add to popular list.\n\n"
+            text="🔥 **Add Trending Video**\n\n"
+                 "Send me a video to add to trending list.\n\n"
                  "Use /cancel to cancel this operation."
         )
 
-    elif query.data == 'clear_popular_files':
+    elif query.data == 'share_stats':
         if not ADMIN_ID or query.from_user.id != ADMIN_ID:
             await query.edit_message_text(text="❌ Access denied.")
             return
         
         try:
-            result = await files_collection.update_many(
-                {'is_popular': True},
-                {'$set': {'is_popular': False}}
-            )
-            await query.edit_message_text(
-                text=f"✅ Cleared {result.modified_count} popular files successfully!"
-            )
-        except Exception as e:
-            logger.error(f"Error clearing popular files: {e}")
-            await query.edit_message_text(text="❌ Error clearing popular files.")
-
-    elif query.data == 'file_stats':
-        if not ADMIN_ID or query.from_user.id != ADMIN_ID:
-            await query.edit_message_text(text="❌ Access denied.")
-            return
-        
-        try:
-            # Get file statistics by category
+            total_shares = await shared_videos_collection.count_documents({})
+            active_shares = await shared_videos_collection.count_documents({
+                'expires_at': {'$gt': datetime.datetime.now()}
+            })
+            expired_shares = total_shares - active_shares
+            
+            # Get top accessed shares
             pipeline = [
-                {'$group': {'_id': '$category', 'count': {'$sum': 1}}},
-                {'$sort': {'count': -1}}
+                {'$match': {'expires_at': {'$gt': datetime.datetime.now()}}},
+                {'$sort': {'access_count': -1}},
+                {'$limit': 5}
             ]
             
-            categories = {}
-            async for doc in files_collection.aggregate(pipeline):
-                categories[doc['_id'] or 'Other'] = doc['count']
+            top_shares = []
+            async for doc in shared_videos_collection.aggregate(pipeline):
+                top_shares.append(f"• Token: {doc['token'][:8]}... - {doc['access_count']} accesses")
             
-            total_files = await files_collection.count_documents({})
-            popular_files = await files_collection.count_documents({'is_popular': True})
+            stats_text = f"🔗 **Share Statistics**\n\n"
+            stats_text += f"📊 Total shares created: {total_shares}\n"
+            stats_text += f"✅ Active shares: {active_shares}\n"
+            stats_text += f"❌ Expired shares: {expired_shares}\n\n"
             
-            stats_text = f"📁 **File Statistics**\n\n"
-            stats_text += f"📊 Total files: {total_files}\n"
-            stats_text += f"⭐ Popular files: {popular_files}\n\n"
-            stats_text += "📋 **By Category:**\n"
+            if top_shares:
+                stats_text += "🔥 **Top Accessed Shares:**\n"
+                stats_text += "\n".join(top_shares[:3])
             
-            for category, count in categories.items():
-                stats_text += f"• {category}: {count}\n"
-            
-            back_keyboard = [[InlineKeyboardButton("🔙 Back", callback_data='manage_files')]]
+            back_keyboard = [[InlineKeyboardButton("🔙 Back to Admin", callback_data='admin_panel')]]
             reply_markup = InlineKeyboardMarkup(back_keyboard)
             
             await query.edit_message_text(
@@ -275,10 +302,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 parse_mode=ParseMode.MARKDOWN
             )
         except Exception as e:
-            logger.error(f"Error in file_stats: {e}")
-            await query.edit_message_text(text="❌ Error loading file statistics.")
+            logger.error(f"Error in share_stats: {e}")
+            await query.edit_message_text(text="❌ Error loading share statistics.")
 
-    # Handle other existing callback queries...
     elif query.data == 'broadcast_menu':
         if not ADMIN_ID or query.from_user.id != ADMIN_ID:
             await query.edit_message_text(text="❌ Access denied.")
@@ -286,39 +312,19 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             
         broadcast_keyboard = [
             [InlineKeyboardButton("📝 Text Message", callback_data='broadcast_text')],
-            [InlineKeyboardButton("🖼 Image Broadcast", callback_data='broadcast_image')],
             [InlineKeyboardButton("🎥 Video Broadcast", callback_data='broadcast_video')],
-            [InlineKeyboardButton("📎 File Broadcast", callback_data='broadcast_file')],
             [InlineKeyboardButton("🔙 Back to Admin", callback_data='admin_panel')]
         ]
         reply_markup = InlineKeyboardMarkup(broadcast_keyboard)
         
         await query.edit_message_text(
             text="📡 **Broadcast Menu**\n\n"
-                 "Choose the type of content to broadcast:\n\n"
-                 "• **Text**: Send a text message to all users\n"
-                 "• **Image**: Send an image to all users\n"
-                 "• **Video**: Send a video to all users\n"
-                 "• **File**: Send a file to all users",
+                 "Choose the type of content to broadcast:",
             reply_markup=reply_markup,
             parse_mode=ParseMode.MARKDOWN
         )
 
-    elif query.data == 'broadcast_file':
-        if not ADMIN_ID or query.from_user.id != ADMIN_ID:
-            await query.edit_message_text(text="❌ Access denied.")
-            return
-        
-        context.user_data['broadcast_mode'] = 'file'
-        await query.edit_message_text(
-            text="📎 **File Broadcast Mode**\n\n"
-                 "Send me the file you want to broadcast to all users.\n"
-                 "You can include a caption with the file.\n\n"
-                 "Use /cancel to cancel this operation."
-        )
-
-    # Add other existing handlers (broadcast_text, broadcast_image, etc.)
-    elif query.data in ['broadcast_text', 'broadcast_image', 'broadcast_video']:
+    elif query.data in ['broadcast_text', 'broadcast_video']:
         await handle_broadcast_setup(query, context)
 
     elif query.data == 'admin_stats':
@@ -329,28 +335,26 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             total_users = await users_collection.count_documents({})
             total_videos = await videos_collection.count_documents({})
-            total_files = await files_collection.count_documents({})
             trending_count = await videos_collection.count_documents({'is_trending': True})
-            popular_count = await files_collection.count_documents({'is_popular': True})
+            total_shares = await shared_videos_collection.count_documents({})
+            active_shares = await shared_videos_collection.count_documents({
+                'expires_at': {'$gt': datetime.datetime.now()}
+            })
 
             today_iso = datetime.date.today().isoformat()
             active_today = await users_collection.count_documents({
                 'last_reset': today_iso,
-                '$or': [
-                    {'daily_count': {'$gt': 0}},
-                    {'file_daily_count': {'$gt': 0}}
-                ]
+                'daily_count': {'$gt': 0}
             })
             
             stats_text = f"📊 **Bot Statistics**\n\n"
             stats_text += f"👥 Total users: {total_users}\n"
             stats_text += f"🔥 Active today: {active_today}\n"
             stats_text += f"🎥 Total videos: {total_videos}\n"
-            stats_text += f"📁 Total files: {total_files}\n"
             stats_text += f"⭐ Trending videos: {trending_count}\n"
-            stats_text += f"⭐ Popular files: {popular_count}\n"
-            stats_text += f"⚙️ Video daily limit: {DAILY_LIMIT}\n"
-            stats_text += f"⚙️ File daily limit: {FILE_DAILY_LIMIT}\n"
+            stats_text += f"🔗 Total shares created: {total_shares}\n"
+            stats_text += f"✅ Active shares: {active_shares}\n"
+            stats_text += f"⚙️ Daily limit: {DAILY_LIMIT}\n"
             stats_text += f"🤖 Auto-delete: 5 minutes"
             
             back_keyboard = [[InlineKeyboardButton("🔙 Back to Admin", callback_data='admin_panel')]]
@@ -369,23 +373,18 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user = query.from_user
         welcome_message = f"Welcome back, {user.mention_markdown_v2()}\\!\n\n"
         welcome_message += f"Your User ID: `{user.id}`\n\n"
-        welcome_message += "This bot shares random videos and files from our collection\\.\n"
-        welcome_message += "Use the buttons below to get content or upload new ones\\."
+        welcome_message += "This bot shares random videos from our collection\\.\n"
+        welcome_message += "Use the buttons below to get videos or upload new ones\\."
 
         keyboard = [
             [
                 InlineKeyboardButton("🎥 Random Video", callback_data='get_video'),
-                InlineKeyboardButton("📁 Random File", callback_data='get_file')
+                InlineKeyboardButton("🔗 Get Share Link", callback_data='get_share_link')
             ],
             [
                 InlineKeyboardButton("📤 Upload Video", callback_data='upload_video'),
-                InlineKeyboardButton("📎 Upload File", callback_data='upload_file')
-            ],
-            [
-                InlineKeyboardButton("🔥 Trending Videos", callback_data='trending_videos'),
-                InlineKeyboardButton("📊 Popular Files", callback_data='popular_files')
-            ],
-            [InlineKeyboardButton("📋 Browse Categories", callback_data='browse_categories')]
+                InlineKeyboardButton("🔥 Trending Videos", callback_data='trending_videos')
+            ]
         ]
         
         if ADMIN_ID and user.id == ADMIN_ID:
@@ -395,8 +394,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         await query.edit_message_text(welcome_message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
 
-async def handle_get_content(query, context, content_type):
-    """Handle getting random video or file."""
+async def handle_get_video(query, context):
+    """Handle getting random video."""
     user_id = query.from_user.id
     
     try:
@@ -406,10 +405,8 @@ async def handle_get_content(query, context, content_type):
             user_doc = {
                 'user_id': user_id,
                 'daily_count': 0,
-                'file_daily_count': 0,
                 'last_reset': datetime.date.today().isoformat(),
-                'uploaded_videos': 0,
-                'uploaded_files': 0
+                'uploaded_videos': 0
             }
             await users_collection.insert_one(user_doc)
         
@@ -419,71 +416,42 @@ async def handle_get_content(query, context, content_type):
                 {'user_id': user_id},
                 {'$set': {
                     'daily_count': 0, 
-                    'file_daily_count': 0,
                     'last_reset': datetime.date.today().isoformat()
                 }}
             )
             user_doc['daily_count'] = 0
-            user_doc['file_daily_count'] = 0
             user_doc['last_reset'] = datetime.date.today().isoformat()
         
-        # Check daily limit based on content type
-        if content_type == 'video':
-            limit = DAILY_LIMIT
-            count_field = 'daily_count'
-            current_count = user_doc.get('daily_count', 0)
-            collection = videos_collection
-            emoji = "🎥"
-        else:  # file
-            limit = FILE_DAILY_LIMIT
-            count_field = 'file_daily_count'
-            current_count = user_doc.get('file_daily_count', 0)
-            collection = files_collection
-            emoji = "📁"
-        
-        if current_count >= limit:
+        # Check daily limit
+        current_count = user_doc.get('daily_count', 0)
+        if current_count >= DAILY_LIMIT:
             await query.edit_message_text(
-                text=f"⏰ You have reached your daily limit of {limit} {content_type}s.\n"
+                text=f"⏰ You have reached your daily limit of {DAILY_LIMIT} videos.\n"
                      f"Please try again tomorrow!"
             )
             return
 
-        # Get all content from collection
-        all_content = []
-        async for doc in collection.find({}):
-            all_content.append(doc)
+        # Get all videos from collection
+        all_videos = []
+        async for doc in videos_collection.find({}):
+            all_videos.append(doc)
         
-        if not all_content:
+        if not all_videos:
             await query.edit_message_text(
-                text=f"{emoji} No {content_type}s available at the moment.\n"
-                     f"Please upload some {content_type}s first!"
+                text="🎥 No videos available at the moment.\n"
+                     "Please upload some videos first!"
             )
             return
 
-        # Send random content
-        random_content = random.choice(all_content)
-        await query.edit_message_text(text=f"{emoji} Here is your random {content_type}:")
+        # Send random video
+        random_video = random.choice(all_videos)
+        await query.edit_message_text(text="🎥 Here is your random video:")
         
-        if content_type == 'video':
-            sent_message = await context.bot.send_video(
-                chat_id=query.message.chat_id, 
-                video=random_content['file_id'],
-                protect_content=True
-            )
-        else:  # file
-            caption = f"📁 **{random_content.get('file_name', 'File')}**\n"
-            if random_content.get('file_size'):
-                caption += f"📏 Size: {format_file_size(random_content['file_size'])}\n"
-            if random_content.get('category'):
-                caption += f"📂 Category: {random_content['category']}"
-            
-            sent_message = await context.bot.send_document(
-                chat_id=query.message.chat_id,
-                document=random_content['file_id'],
-                caption=caption,
-                parse_mode=ParseMode.MARKDOWN,
-                protect_content=True
-            )
+        sent_message = await context.bot.send_video(
+            chat_id=query.message.chat_id, 
+            video=random_video['file_id'],
+            protect_content=True
+        )
         
         # Schedule message deletion after 5 minutes
         context.job_queue.run_once(
@@ -495,67 +463,85 @@ async def handle_get_content(query, context, content_type):
         # Update user's daily count
         await users_collection.update_one(
             {'user_id': user_id},
-            {'$inc': {count_field: 1}}
+            {'$inc': {'daily_count': 1}}
         )
         
-        remaining = limit - (current_count + 1)
+        remaining = DAILY_LIMIT - (current_count + 1)
         if remaining > 0:
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
-                text=f"✅ {content_type.title()} sent! You have {remaining} {content_type}s left today."
+                text=f"✅ Video sent! You have {remaining} videos left today."
             )
         else:
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
-                text=f"✅ {content_type.title()} sent! You've reached your daily limit. See you tomorrow!"
+                text=f"✅ Video sent! You've reached your daily limit. See you tomorrow!"
             )
             
     except Exception as e:
-        logger.error(f"Error in get_{content_type}: {e}")
+        logger.error(f"Error in get_video: {e}")
         await query.edit_message_text(text="❌ Sorry, there was an error processing your request.")
 
-async def handle_trending_content(query, context, content_type):
-    """Handle trending videos or popular files."""
+async def handle_get_share_link(query, context):
+    """Handle generating share link for a random video."""
+    user_id = query.from_user.id
+    
     try:
-        if content_type == 'video':
-            collection = videos_collection
-            field = 'is_trending'
-            emoji = "🔥"
-            title = "trending videos"
+        # Get all videos from collection
+        all_videos = []
+        async for doc in videos_collection.find({}):
+            all_videos.append(doc)
+        
+        if not all_videos:
+            await query.edit_message_text(
+                text="🎥 No videos available to share at the moment.\n"
+                     "Please upload some videos first!"
+            )
+            return
+
+        # Select random video
+        random_video = random.choice(all_videos)
+        
+        # Create share URL
+        share_url = await create_share_url(random_video, user_id)
+        
+        if share_url:
+            share_message = f"🔗 **Share Link Generated!**\n\n"
+            share_message += f"📤 You can share this link with others:\n"
+            share_message += f"`{share_url}`\n\n"
+            share_message += f"⏰ **Link expires in 7 days**\n"
+            share_message += f"🔒 Link is protected and trackable\n\n"
+            share_message += f"📊 Anyone can access this video through the link"
+            
+            await query.edit_message_text(
+                text=share_message,
+                parse_mode=ParseMode.MARKDOWN
+            )
         else:
-            collection = files_collection
-            field = 'is_popular'
-            emoji = "⭐"
-            title = "popular files"
+            await query.edit_message_text(
+                text="❌ Error generating share link. Please try again."
+            )
+            
+    except Exception as e:
+        logger.error(f"Error generating share link: {e}")
+        await query.edit_message_text(text="❌ Sorry, there was an error generating the share link.")
+
+async def handle_trending_videos(query, context):
+    """Handle trending videos."""
+    try:
+        trending_videos = []
+        async for doc in videos_collection.find({'is_trending': True}):
+            trending_videos.append(doc)
         
-        trending_content = []
-        async for doc in collection.find({field: True}):
-            trending_content.append(doc)
-        
-        if trending_content:
-            await query.edit_message_text(text=f"{emoji} Here are the {title}:")
-            for content in trending_content[:3]:  # Limit to 3 items
+        if trending_videos:
+            await query.edit_message_text(text="🔥 Here are the trending videos:")
+            for video in trending_videos[:3]:  # Limit to 3 videos
                 try:
-                    if content_type == 'video':
-                        sent_message = await context.bot.send_video(
-                            chat_id=query.message.chat_id, 
-                            video=content['file_id'],
-                            protect_content=True
-                        )
-                    else:
-                        caption = f"📁 **{content.get('file_name', 'File')}**\n"
-                        if content.get('file_size'):
-                            caption += f"📏 Size: {format_file_size(content['file_size'])}\n"
-                        if content.get('category'):
-                            caption += f"📂 Category: {content['category']}"
-                        
-                        sent_message = await context.bot.send_document(
-                            chat_id=query.message.chat_id,
-                            document=content['file_id'],
-                            caption=caption,
-                            parse_mode=ParseMode.MARKDOWN,
-                            protect_content=True
-                        )
+                    sent_message = await context.bot.send_video(
+                        chat_id=query.message.chat_id, 
+                        video=video['file_id'],
+                        protect_content=True
+                    )
                     
                     context.job_queue.run_once(
                         delete_message,
@@ -563,112 +549,12 @@ async def handle_trending_content(query, context, content_type):
                         data={'chat_id': query.message.chat_id, 'message_id': sent_message.message_id}
                     )
                 except TelegramError as e:
-                    logger.error(f"Error sending {content_type} {content['file_id']}: {e}")
+                    logger.error(f"Error sending trending video {video['file_id']}: {e}")
         else:
-            await query.edit_message_text(text=f"{emoji} No {title} available at the moment.")
+            await query.edit_message_text(text="🔥 No trending videos available at the moment.")
     except Exception as e:
-        logger.error(f"Error in {title}: {e}")
-        await query.edit_message_text(text=f"❌ Error loading {title}.")
-
-async def handle_browse_categories(query, context):
-    """Handle browsing file categories."""
-    try:
-        # Get unique categories
-        pipeline = [
-            {'$group': {'_id': '$category', 'count': {'$sum': 1}}},
-            {'$sort': {'count': -1}}
-        ]
-        
-        categories = []
-        async for doc in files_collection.aggregate(pipeline):
-            if doc['_id']:  # Skip null categories
-                categories.append((doc['_id'], doc['count']))
-        
-        if categories:
-            keyboard = []
-            for i in range(0, len(categories), 2):
-                row = []
-                cat_name, count = categories[i]
-                row.append(InlineKeyboardButton(f"📂 {cat_name} ({count})", callback_data=f'category_{cat_name}'))
-                
-                if i + 1 < len(categories):
-                    cat_name2, count2 = categories[i + 1]
-                    row.append(InlineKeyboardButton(f"📂 {cat_name2} ({count2})", callback_data=f'category_{cat_name2}'))
-                
-                keyboard.append(row)
-            
-            keyboard.append([InlineKeyboardButton("🔙 Back to Main", callback_data='back_to_main')])
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await query.edit_message_text(
-                text="📋 **File Categories**\n\nChoose a category to browse:",
-                reply_markup=reply_markup,
-                parse_mode=ParseMode.MARKDOWN
-            )
-        else:
-            await query.edit_message_text(text="📂 No file categories available yet.")
-    except Exception as e:
-        logger.error(f"Error in browse_categories: {e}")
-        await query.edit_message_text(text="❌ Error loading categories.")
-
-async def handle_category_files(query, context, category):
-    """Handle showing files from a specific category."""
-    try:
-        files = []
-        async for doc in files_collection.find({'category': category}).limit(5):
-            files.append(doc)
-        
-        if files:
-            await query.edit_message_text(text=f"📂 **{category}** files:")
-            for file_doc in files:
-                caption = f"📁 **{file_doc.get('file_name', 'File')}**\n"
-                if file_doc.get('file_size'):
-                    caption += f"📏 Size: {format_file_size(file_doc['file_size'])}\n"
-                caption += f"📂 Category: {category}"
-                
-                sent_message = await context.bot.send_document(
-                    chat_id=query.message.chat_id,
-                    document=file_doc['file_id'],
-                    caption=caption,
-                    parse_mode=ParseMode.MARKDOWN,
-                    protect_content=True
-                )
-                
-                context.job_queue.run_once(
-                    delete_message,
-                    300,
-                    data={'chat_id': query.message.chat_id, 'message_id': sent_message.message_id}
-                )
-        else:
-            await query.edit_message_text(text=f"📂 No files found in **{category}** category.")
-    except Exception as e:
-        logger.error(f"Error in category_files for {category}: {e}")
-        await query.edit_message_text(text="❌ Error loading category files.")
-
-def get_file_category(file_name):
-    """Determine file category based on extension."""
-    if not file_name:
-        return "Other"
-    
-    extension = file_name.lower().split('.')[-1] if '.' in file_name else ""
-    
-    categories = {
-        'Images': ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'],
-        'Documents': ['pdf', 'doc', 'docx', 'txt', 'rtf', 'odt'],
-        'Audio': ['mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a'],
-        'Video': ['mp4', 'avi', 'mkv', 'mov', 'wmv', 'flv', 'webm'],
-        'Archives': ['zip', 'rar', '7z', 'tar', 'gz', 'bz2'],
-        'Spreadsheets': ['xls', 'xlsx', 'csv', 'ods'],
-        'Presentations': ['ppt', 'pptx', 'odp'],
-        'Code': ['py', 'js', 'html', 'css', 'java', 'cpp', 'c', 'php', 'rb'],
-        'Ebooks': ['epub', 'mobi', 'azw', 'azw3', 'fb2']
-    }
-    
-    for category, extensions in categories.items():
-        if extension in extensions:
-            return category
-    
-    return "Other"
+        logger.error(f"Error in trending videos: {e}")
+        await query.edit_message_text(text="❌ Error loading trending videos.")
 
 async def upload_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles video uploads from users or admin for broadcast/trending."""
@@ -727,83 +613,8 @@ async def upload_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     else:
         await update.message.reply_text("❌ Please send a valid video file.")
 
-async def upload_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles file uploads from users or admin for broadcast/popular."""
-    if not update.message:
-        logger.error("No message in update")
-        return
-    
-    user_id = update.message.from_user.id
-    
-    # Handle admin operations first
-    if ADMIN_ID and user_id == ADMIN_ID:
-        if context.user_data.get('broadcast_mode') == 'file' or context.user_data.get('popular_file_mode'):
-            await handle_admin_content(update, context)
-            return
-    
-    document = update.message.document
-    if document:
-        try:
-            # Check file size limit
-            if document.file_size > MAX_FILE_SIZE:
-                await update.message.reply_text(
-                    f"❌ File too large! Maximum size allowed is {format_file_size(MAX_FILE_SIZE)}.\n"
-                    f"Your file size: {format_file_size(document.file_size)}"
-                )
-                return
-
-            # Check if file already exists
-            existing_file = await files_collection.find_one({'file_id': document.file_id})
-            if existing_file:
-                await update.message.reply_text("This file has already been uploaded.")
-                return
-
-            # Determine file category
-            category = get_file_category(document.file_name)
-
-            # Add file to collection
-            await files_collection.insert_one({
-                'file_id': document.file_id,
-                'file_name': document.file_name,
-                'file_size': document.file_size,
-                'mime_type': document.mime_type,
-                'category': category,
-                'is_popular': False,
-                'upload_timestamp': datetime.datetime.now(),
-                'uploaded_by': user_id
-            })
-            
-            # Update user's upload count
-            await users_collection.update_one(
-                {'user_id': user_id},
-                {'$inc': {'uploaded_files': 1}},
-                upsert=True
-            )
-            
-            # Get counts for response
-            total_files = await files_collection.count_documents({})
-            user_doc = await users_collection.find_one({'user_id': user_id})
-            uploaded_files = user_doc.get('uploaded_files', 0) if user_doc else 0
-
-            await update.message.reply_text(
-                f"✅ File uploaded successfully!\n"
-                f"📁 File: {document.file_name}\n"
-                f"📏 Size: {format_file_size(document.file_size)}\n"
-                f"📂 Category: {category}\n"
-                f"📊 Total files uploaded by you: {uploaded_files}\n"
-                f"📁 Total files in collection: {total_files}"
-            )
-            
-            logger.info(f"User {user_id} uploaded file {document.file_name}. Total files: {total_files}")
-            
-        except Exception as e:
-            logger.error(f"Error uploading file: {e}")
-            await update.message.reply_text("❌ Sorry, there was an error uploading your file.")
-    else:
-        await update.message.reply_text("❌ Please send a valid file.")
-
 async def handle_broadcast_setup(query, context):
-    """Handle broadcast setup for text, image, video."""
+    """Handle broadcast setup for text, video."""
     broadcast_type = query.data.replace('broadcast_', '')
     
     if not ADMIN_ID or query.from_user.id != ADMIN_ID:
@@ -814,7 +625,6 @@ async def handle_broadcast_setup(query, context):
     
     messages = {
         'text': "📝 **Text Broadcast Mode**\n\nSend me the text message you want to broadcast to all users.",
-        'image': "🖼 **Image Broadcast Mode**\n\nSend me the image you want to broadcast to all users.\nYou can include a caption with the image.",
         'video': "🎥 **Video Broadcast Mode**\n\nSend me the video you want to broadcast to all users.\nYou can include a caption with the video."
     }
     
@@ -824,47 +634,12 @@ async def handle_broadcast_setup(query, context):
     )
 
 async def handle_admin_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles content (video, photo, text, file) sent by admin for broadcast, trending, or popular."""
+    """Handles content (video, text) sent by admin for broadcast or trending."""
     if not ADMIN_ID or update.message.from_user.id != ADMIN_ID:
         return
     
     broadcast_mode = context.user_data.get('broadcast_mode')
     trending_mode = context.user_data.get('trending_mode')
-    popular_file_mode = context.user_data.get('popular_file_mode')
-    
-    # Handle popular file mode
-    if popular_file_mode:
-        document = update.message.document
-        if document:
-            try:
-                category = get_file_category(document.file_name)
-                
-                # Add or update file as popular
-                result = await files_collection.update_one(
-                    {'file_id': document.file_id},
-                    {
-                        '$set': {
-                            'file_name': document.file_name,
-                            'file_size': document.file_size,
-                            'mime_type': document.mime_type,
-                            'category': category,
-                            'is_popular': True,
-                            'upload_timestamp': datetime.datetime.now(),
-                            'uploaded_by': update.message.from_user.id
-                        }
-                    },
-                    upsert=True
-                )
-                
-                await update.message.reply_text("✅ File added to popular list successfully!")
-                context.user_data.pop('popular_file_mode', None)
-                
-            except Exception as e:
-                logger.error(f"Error adding popular file: {e}")
-                await update.message.reply_text("❌ Error adding file to popular list.")
-        else:
-            await update.message.reply_text("❌ Please send a file.")
-        return
     
     # Handle trending mode
     if trending_mode:
@@ -933,27 +708,6 @@ async def handle_admin_content(update: Update, context: ContextTypes.DEFAULT_TYP
                 
                 await asyncio.sleep(0.05)  # Rate limiting
         
-        elif broadcast_mode == 'image' and update.message.photo:
-            photo = update.message.photo[-1]
-            caption = update.message.caption or ""
-            broadcast_caption = f"📢 **Admin Announcement**\n\n{caption}" if caption else "📢 **Admin Announcement**"
-            
-            for user_id in all_users:
-                try:
-                    await context.bot.send_photo(
-                        chat_id=user_id,
-                        photo=photo.file_id,
-                        caption=broadcast_caption,
-                        parse_mode=ParseMode.MARKDOWN,
-                        protect_content=True
-                    )
-                    success_count += 1
-                except TelegramError as e:
-                    logger.error(f"Error broadcasting image to user {user_id}: {e}")
-                    failed_count += 1
-                
-                await asyncio.sleep(0.05)
-        
         elif broadcast_mode == 'video' and update.message.video:
             video = update.message.video
             caption = update.message.caption or ""
@@ -971,27 +725,6 @@ async def handle_admin_content(update: Update, context: ContextTypes.DEFAULT_TYP
                     success_count += 1
                 except TelegramError as e:
                     logger.error(f"Error broadcasting video to user {user_id}: {e}")
-                    failed_count += 1
-                
-                await asyncio.sleep(0.05)
-        
-        elif broadcast_mode == 'file' and update.message.document:
-            document = update.message.document
-            caption = update.message.caption or ""
-            broadcast_caption = f"📢 **Admin Announcement**\n\n{caption}" if caption else "📢 **Admin Announcement**"
-            
-            for user_id in all_users:
-                try:
-                    await context.bot.send_document(
-                        chat_id=user_id,
-                        document=document.file_id,
-                        caption=broadcast_caption,
-                        parse_mode=ParseMode.MARKDOWN,
-                        protect_content=True
-                    )
-                    success_count += 1
-                except TelegramError as e:
-                    logger.error(f"Error broadcasting file to user {user_id}: {e}")
                     failed_count += 1
                 
                 await asyncio.sleep(0.05)
@@ -1022,14 +755,13 @@ async def handle_admin_content(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
 async def cancel_operation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Cancels any ongoing admin operation (broadcast, trending add, popular file add)."""
+    """Cancels any ongoing admin operation (broadcast, trending add)."""
     if not ADMIN_ID or update.message.from_user.id != ADMIN_ID:
         await update.message.reply_text("❌ Only admin can use this command.")
         return
     
     context.user_data.pop('broadcast_mode', None)
     context.user_data.pop('trending_mode', None)
-    context.user_data.pop('popular_file_mode', None)
     
     await update.message.reply_text(
         "✅ **Operation Cancelled**\n\n"
@@ -1057,38 +789,33 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_doc = await users_collection.find_one({'user_id': user_id})
         
         daily_count = user_doc.get('daily_count', 0) if user_doc else 0
-        file_daily_count = user_doc.get('file_daily_count', 0) if user_doc else 0
         uploaded_videos = user_doc.get('uploaded_videos', 0) if user_doc else 0
-        uploaded_files = user_doc.get('uploaded_files', 0) if user_doc else 0
         
         video_remaining = max(0, DAILY_LIMIT - daily_count)
-        file_remaining = max(0, FILE_DAILY_LIMIT - file_daily_count)
         
         stats_text = f"📊 **Your Stats:**\n"
         stats_text += f"🆔 User ID: `{user_id}`\n\n"
         stats_text += f"🎥 Videos watched today: {daily_count}/{DAILY_LIMIT}\n"
         stats_text += f"⏳ Videos remaining today: {video_remaining}\n"
-        stats_text += f"📁 Files downloaded today: {file_daily_count}/{FILE_DAILY_LIMIT}\n"
-        stats_text += f"⏳ Files remaining today: {file_remaining}\n\n"
-        stats_text += f"📤 Videos uploaded: {uploaded_videos}\n"
-        stats_text += f"📎 Files uploaded: {uploaded_files}"
+        stats_text += f"📤 Videos uploaded: {uploaded_videos}"
 
         if ADMIN_ID and user_id == ADMIN_ID:
             total_users = await users_collection.count_documents({})
             total_videos = await videos_collection.count_documents({})
-            total_files = await files_collection.count_documents({})
             trending_count = await videos_collection.count_documents({'is_trending': True})
-            popular_count = await files_collection.count_documents({'is_popular': True})
+            total_shares = await shared_videos_collection.count_documents({})
+            active_shares = await shared_videos_collection.count_documents({
+                'expires_at': {'$gt': datetime.datetime.now()}
+            })
             
             stats_text += f"\n\n📊 **Bot Admin Statistics:**\n"
             stats_text += f"👥 Total users: {total_users}\n"
             stats_text += f"🎥 Total videos in collection: {total_videos}\n"
-            stats_text += f"📁 Total files in collection: {total_files}\n"
             stats_text += f"🔥 Trending videos: {trending_count}\n"
-            stats_text += f"⭐ Popular files: {popular_count}\n"
-            stats_text += f"⚙️ Video Daily Limit: {DAILY_LIMIT}\n"
-            stats_text += f"⚙️ File Daily Limit: {FILE_DAILY_LIMIT}\n"
-            stats_text += f"📏 Max File Size: {format_file_size(MAX_FILE_SIZE)}"
+            stats_text += f"🔗 Total shares created: {total_shares}\n"
+            stats_text += f"✅ Active shares: {active_shares}\n"
+            stats_text += f"⚙️ Daily Limit: {DAILY_LIMIT}\n"
+            stats_text += f"🤖 Auto-delete: 5 minutes"
 
         await update.message.reply_text(stats_text, parse_mode=ParseMode.MARKDOWN)
         
@@ -1096,19 +823,23 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error(f"Error in stats: {e}")
         await update.message.reply_text("❌ Error loading statistics.")
 
-async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles incoming photo messages, primarily for admin broadcast."""
-    if ADMIN_ID and update.message.from_user.id == ADMIN_ID and context.user_data.get('broadcast_mode') == 'image':
-        await handle_admin_content(update, context)
-    else:
-        await update.message.reply_text("📸 Thanks for the photo! Currently, I only support video and file uploads or admin broadcasts.")
-
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles incoming text messages, primarily for admin broadcast."""
     if ADMIN_ID and update.message.from_user.id == ADMIN_ID and context.user_data.get('broadcast_mode') == 'text':
         await handle_admin_content(update, context)
     else:
-        await update.message.reply_text("💬 I'm not configured to respond to general text messages yet. Please use the buttons or send videos/files!")
+        await update.message.reply_text("💬 I'm not configured to respond to general text messages yet. Please use the buttons or send videos!")
+
+async def cleanup_expired_shares(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Cleanup expired share links."""
+    try:
+        result = await shared_videos_collection.delete_many({
+            'expires_at': {'$lt': datetime.datetime.now()}
+        })
+        if result.deleted_count > 0:
+            logger.info(f"Cleaned up {result.deleted_count} expired share links")
+    except Exception as e:
+        logger.error(f"Error cleaning up expired shares: {e}")
 
 async def post_init(application: Application) -> None:
     """Post-initialization hook to connect to MongoDB."""
@@ -1126,6 +857,9 @@ def main() -> None:
         return
     if not WEBHOOK_URL:
         logger.error("WEBHOOK_URL not found in environment variables. Webhook deployment requires this.")
+        return
+    if not BOT_USERNAME:
+        logger.error("BOT_USERNAME not found in environment variables. Required for share URL generation.")
         return
     
     # Create application with updated builder pattern
@@ -1146,12 +880,16 @@ def main() -> None:
     
     # Add message handlers
     application.add_handler(MessageHandler(filters.VIDEO, upload_video))
-    application.add_handler(MessageHandler(filters.Document.ALL, upload_file))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
     
-    # Add a periodic cleanup job (optional)
+    # Add periodic cleanup job for expired shares
     if application.job_queue:
+        application.job_queue.run_repeating(
+            cleanup_expired_shares,
+            interval=3600,  # Every hour
+            first=3600,
+        )
+        
         application.job_queue.run_repeating(
             lambda context: logger.info("Bot is running..."),
             interval=3600,  # Every hour
@@ -1160,6 +898,7 @@ def main() -> None:
     
     logger.info(f"Starting bot in webhook mode on {LISTEN_ADDRESS}:{PORT}...")
     logger.info(f"Webhook URL: {WEBHOOK_URL}")
+    logger.info(f"Bot Username: {BOT_USERNAME}")
 
     try:
         # Start webhook with error handling
