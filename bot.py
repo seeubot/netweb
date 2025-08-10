@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import base64
 import re
+import uvicorn
 from typing import Dict, Any, Optional, List
 from motor.motor_asyncio import AsyncIOMotorClient
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -14,7 +15,13 @@ from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from telegram.error import TelegramError
 from dotenv import load_dotenv
-from aiohttp import web # New import for the web server
+from fastapi import FastAPI, Request
+from telegram.warnings import PTBUserWarning
+import warnings
+
+# Suppress PTBUserWarning for webhook updates
+warnings.filterwarnings("ignore", category=PTBUserWarning)
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -32,8 +39,8 @@ SOURCE_CHANNEL = os.getenv('SOURCE_CHANNEL')
 ADMIN_ID = int(os.getenv('ADMIN_ID')) if os.getenv('ADMIN_ID') else None
 DAILY_LIMIT = int(os.getenv('DAILY_LIMIT', 5))
 BOT_USERNAME = os.getenv('BOT_USERNAME', 'your_bot_username')
-MONGO_URI = "mongodb+srv://movie:movie@movie.tylkv.mongodb.net/?retryWrites=true&w=majority&appName=movie"
-DB_NAME = "telegram_bot_db"
+MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://movie:movie@movie.tylkv.mongodb.net/?retryWrites=true&w=majority&appName=movie")
+DB_NAME = os.getenv("DB_NAME", "telegram_bot_db")
 
 # Webhook configuration for Koyeb
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
@@ -52,6 +59,9 @@ ott_collection = None # New collection for OTT content
 OTT_STATE = 'ott_state'
 OTT_TYPE = 'ott_type'
 OTT_DATA = 'ott_data'
+
+# FastAPI app instance
+app = FastAPI()
 
 async def connect_to_mongodb():
     """Connects to MongoDB and sets up global collections."""
@@ -640,89 +650,88 @@ async def cleanup_expired_shares(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.info(f"Cleaned up {result.deleted_count} expired share links")
     except Exception as e:
         logger.error(f"Error cleaning up expired shares: {e}")
-        
-# --- NEW AIOHTTP ENDPOINT FOR OTT CONTENT ---
-async def get_ott_content(request):
-    """
-    HTTP GET endpoint to retrieve all OTT content from the database.
-    This will be called by the frontend web page.
-    """
-    if not ott_collection:
-        return web.json_response({"error": "Database not initialized"}, status=503)
 
-    try:
-        # Fetch all documents from the collection
-        cursor = ott_collection.find({})
-        ott_content_list = []
-        for doc in await cursor.to_list(length=None):
-            # MongoDB's ObjectId is not JSON serializable, so convert it to a string
-            doc['_id'] = str(doc['_id'])
-            ott_content_list.append(doc)
-        
-        # Return the data as a JSON response
-        return web.json_response(ott_content_list)
-    
-    except Exception as e:
-        logger.error(f"Error fetching OTT content: {e}")
-        return web.json_response({"error": "Failed to fetch content"}, status=500)
+# --- NEW FastAPI ENDPOINTS ---
 
-async def run_bot_and_server(application, app_runner):
-    """Starts both the Telegram bot and the aiohttp web server."""
-    # Start the aiohttp web server
-    await app_runner.setup()
-    site = web.TCPSite(app_runner, LISTEN_ADDRESS, PORT)
-    await site.start()
-    logger.info(f"Web server started on http://{LISTEN_ADDRESS}:{PORT}")
+@app.on_event("startup")
+async def startup_event():
+    """Application startup event to connect to MongoDB and set up the bot."""
+    await connect_to_mongodb()
     
-    # Start the Telegram bot
-    await application.post_init()
-    logger.info(f"Bot started in webhook mode...")
-    
-    # This keeps the application running indefinitely
-    await asyncio.Future()
-
-def main() -> None:
-    """Starts the bot and sets up all handlers."""
-    if not API_TOKEN:
-        logger.error("TELEGRAM_API_TOKEN not found in environment variables")
-        return
-    if not WEBHOOK_URL:
-        logger.error("WEBHOOK_URL not found in environment variables. Webhook deployment requires this.")
-        return
-    if not BOT_USERNAME:
-        logger.error("BOT_USERNAME not found in environment variables. Required for share URL generation.")
-        return
-    
-    # Create the Telegram bot application
-    tg_application = (
+    global application
+    application = (
         Application.builder()
         .token(API_TOKEN)
         .build()
     )
 
-    # Set up Telegram bot handlers
-    tg_application.add_handler(CommandHandler("start", start))
-    tg_application.add_handler(CommandHandler("stats", stats))
-    tg_application.add_handler(CommandHandler("cancel", cancel_operation))
-    tg_application.add_handler(CallbackQueryHandler(button))
-    tg_application.add_handler(MessageHandler(filters.VIDEO, upload_video))
-    tg_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(CommandHandler("cancel", cancel_operation))
+    application.add_handler(CallbackQueryHandler(button))
+    application.add_handler(MessageHandler(filters.VIDEO, upload_video))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
     
-    if tg_application.job_queue:
-        tg_application.job_queue.run_repeating(cleanup_expired_shares, interval=3600, first=3600)
-        tg_application.job_queue.run_repeating(lambda context: logger.info("Bot is running..."), interval=3600, first=3600)
+    if application.job_queue:
+        application.job_queue.run_repeating(cleanup_expired_shares, interval=3600, first=3600)
+        application.job_queue.run_repeating(lambda context: logger.info("Bot is running..."), interval=3600, first=3600)
     
-    # Set up the aiohttp web server and the bot webhook
-    web_app = web.Application()
-    web_app.router.add_get('/ott_content', get_ott_content)
-    web_app.router.add_post("", tg_application.updater.webhook)
-    
-    runner = web.AppRunner(web_app)
+    await application.bot.set_webhook(url=f"{WEBHOOK_URL}")
+    await application.initialize()
+    await application.start()
+    logger.info("Bot started and webhook set.")
 
-    asyncio.get_event_loop().run_until_complete(connect_to_mongodb())
-    asyncio.get_event_loop().run_until_complete(run_bot_and_server(tg_application, runner))
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Application shutdown event to stop the bot and close MongoDB connection."""
+    global db_client
+    await application.stop()
+    if db_client:
+        db_client.close()
+    logger.info("Bot stopped and MongoDB connection closed.")
+
+@app.post("/")
+async def telegram_webhook(request: Request):
+    """Handles incoming Telegram webhook updates."""
+    # This is a bit of a hack to get PTB to play nicely with FastAPI.
+    # The webhook handler needs to be called with the bot application instance.
+    update_json = await request.json()
+    update = Update.de_json(update_json, application.bot)
+    await application.process_update(update)
+    return {"message": "ok"}
+
+@app.get("/ott_content")
+async def get_ott_content():
+    """
+    HTTP GET endpoint to retrieve all OTT content from the database.
+    This will be called by the frontend web page.
+    """
+    if not ott_collection:
+        return {"error": "Database not initialized"}, 503
+
+    try:
+        cursor = ott_collection.find({})
+        ott_content_list = []
+        async for doc in cursor:
+            doc['_id'] = str(doc['_id'])
+            ott_content_list.append(doc)
+        
+        return ott_content_list
     
+    except Exception as e:
+        logger.error(f"Error fetching OTT content: {e}")
+        return {"error": "Failed to fetch content"}, 500
+
+
+def main() -> None:
+    """Starts the application using uvicorn."""
+    if not all([API_TOKEN, WEBHOOK_URL, BOT_USERNAME]):
+        logger.error("Missing required environment variables. Please check your .env file.")
+        return
     
+    uvicorn.run("bot:app", host=LISTEN_ADDRESS, port=PORT, log_level="info", reload=False)
+
 if __name__ == '__main__':
     try:
         main()
