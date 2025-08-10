@@ -19,7 +19,6 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse
-from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 import warnings
 
@@ -635,509 +634,7 @@ async def upload_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         
     try:
         video_file_id = update.message.video.file_id
-        caption = update.message.caption if update.message.caption else "Trending Video"
-        
-        try:
-            video_doc = await videos_collection.find_one({'file_id': video_file_id})
-            if video_doc:
-                await videos_collection.update_one(
-                    {'_id': video_doc['_id']},
-                    {'$set': {'is_trending': True}}
-                )
-                await update.message.reply_text("✅ Video marked as trending successfully!")
-            else:
-                await update.message.reply_text("❌ Video not found in database. Please upload it first.")
-        except Exception as e:
-            logger.error(f"Error marking video as trending: {e}")
-            await update.message.reply_text("❌ An error occurred.")
-        
-        del context.user_data['trending_mode']
-
-async def broadcast_message(context: ContextTypes.DEFAULT_TYPE, message: str) -> None:
-    """Broadcasts a text message to all users."""
-    users = await users_collection.find().to_list(length=None)
-    for user in users:
-        try:
-            await context.bot.send_message(
-                chat_id=user['user_id'],
-                text=f"📢 **Broadcast Message**\n\n{message}",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            await asyncio.sleep(0.1) # Add a small delay to avoid rate limiting
-        except TelegramError as e:
-            logger.error(f"Failed to send broadcast to user {user['user_id']}: {e}")
-    
-    await context.bot.send_message(
-        chat_id=ADMIN_ID,
-        text=f"✅ Broadcast to {len(users)} users complete."
-    )
-
-async def broadcast_video(context: ContextTypes.DEFAULT_TYPE, video_id: str) -> None:
-    """Broadcasts a video to all users."""
-    users = await users_collection.find().to_list(length=None)
-    for user in users:
-        try:
-            await context.bot.send_video(
-                chat_id=user['user_id'],
-                video=video_id,
-                caption="📢 **Broadcast Video**",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            await asyncio.sleep(0.1) # Add a small delay
-        except TelegramError as e:
-            logger.error(f"Failed to send broadcast to user {user['user_id']}: {e}")
-    
-    await context.bot.send_message(
-        chat_id=ADMIN_ID,
-        text=f"✅ Video broadcast to {len(users)} users complete."
-    )
-
-async def cancel_operation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Cancels any ongoing admin operation (broadcast, trending add, OTT)."""
-    if not ADMIN_ID or update.message.from_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Only admin can use this command.")
-        return
-    
-    context.user_data.pop('broadcast_mode', None)
-    context.user_data.pop('trending_mode', None)
-    context.user_data.pop('upload_mode', None)
-    context.user_data.pop(OTT_STATE, None)
-    context.user_data.pop(OTT_TYPE, None)
-    context.user_data.pop(OTT_DATA, None)
-    
-    await update.message.reply_text(
-        "✅ **Operation Cancelled**\n\n"
-        "All ongoing operations have been cancelled.\n"
-        "Use /start to return to the main menu.",
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-async def delete_message(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Deletes a message after a specified delay using JobQueue."""
-    job_data = context.job.data
-    try:
-        await context.bot.delete_message(
-            chat_id=job_data['chat_id'], 
-            message_id=job_data['message_id']
-        )
-        logger.info(f"Auto-deleted message {job_data['message_id']} from chat {job_data['chat_id']}")
-    except TelegramError as e:
-        logger.error(f"Error deleting message: {e}")
-
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Displays bot usage statistics."""
-    try:
-        total_users = await users_collection.count_documents({})
-        total_videos = await videos_collection.count_documents({})
-        trending_count = await videos_collection.count_documents({'is_trending': True})
-        
-        stats_text = f"📊 **Bot Statistics**\n\n"
-        stats_text += f"👥 Total users: {total_users}\n"
-        stats_text += f"🎥 Total videos: {total_videos}\n"
-        stats_text += f"🔥 Trending videos: {trending_count}\n"
-        
-        await update.message.reply_text(stats_text, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logger.error(f"Error fetching stats: {e}")
-        await update.message.reply_text("❌ An error occurred while fetching statistics.")
-
-async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles incoming text messages, including for the new OTT content flow."""
-    user_id = update.message.from_user.id
-    logger.info(f"Text message from user {user_id}: {update.message.text}")
-    
-    if ADMIN_ID and user_id == ADMIN_ID and context.user_data.get(OTT_STATE):
-        await handle_ott_input(update, context)
-        return
-
-    if ADMIN_ID and user_id == ADMIN_ID and context.user_data.get('broadcast_mode') == 'text':
-        await handle_admin_content(update, context)
-        return
-    
-    await update.message.reply_text("💬 I'm not configured to respond to general text messages yet. Please use the buttons or send videos!")
-
-async def handle_ott_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the multi-step input for adding OTT content."""
-    state = context.user_data.get(OTT_STATE)
-    ott_type = context.user_data.get(OTT_TYPE)
-    ott_data = context.user_data.get(OTT_DATA)
-
-    if not update.message:
-        return
-
-    message = update.message
-    
-    if state == 'awaiting_name':
-        ott_data['name'] = message.text
-        context.user_data[OTT_STATE] = 'awaiting_thumbnail'
-        await message.reply_text("🖼️ Please send the **thumbnail image** for the content.")
-    
-    elif state == 'awaiting_thumbnail':
-        if not message.photo:
-            await message.reply_text("❌ Please send a valid photo. Try again or use /cancel.")
-            return
-        
-        ott_data['thumbnail'] = message.photo[-1].file_id
-        
-        if ott_type == 'movie':
-            context.user_data[OTT_STATE] = 'awaiting_url'
-            await message.reply_text("🔗 Please send the **streaming URL** for the movie.")
-        
-        elif ott_type == 'series':
-            ott_data['seasons'] = []
-            context.user_data[OTT_STATE] = 'awaiting_season_name'
-            await message.reply_text("📺 Now, let's add the first season. Please send the **name of the season**.")
-
-    elif state == 'awaiting_url':
-        ott_data['streaming_url'] = message.text
-        
-        ott_data['type'] = 'movie'
-        await ott_collection.insert_one(ott_data)
-        
-        await message.reply_text(
-            f"✅ **Movie '{ott_data['name']}' added successfully!**\n\n"
-            f"Use /start to return to the main menu.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        context.user_data.pop(OTT_STATE)
-        context.user_data.pop(OTT_TYPE)
-        context.user_data.pop(OTT_DATA)
-
-    elif state == 'awaiting_season_name':
-        season = {'season_name': message.text, 'episodes': []}
-        ott_data['seasons'].append(season)
-        context.user_data[OTT_STATE] = 'awaiting_episode_name'
-        await message.reply_text("🎬 Season added. Now send the **name of the first episode**.")
-
-    elif state == 'awaiting_episode_name':
-        current_season = ott_data['seasons'][-1]
-        episode = {'episode_name': message.text}
-        context.user_data['current_episode_data'] = episode
-        context.user_data[OTT_STATE] = 'awaiting_episode_url'
-        await message.reply_text("🔗 Please send the **streaming URL** for this episode.")
-
-    elif state == 'awaiting_episode_url':
-        current_season = ott_data['seasons'][-1]
-        episode = context.user_data.get('current_episode_data')
-        if not episode:
-            await message.reply_text("❌ An error occurred. Please use /cancel and try again.")
-            return
-
-        episode['streaming_url'] = message.text
-        current_season['episodes'].append(episode)
-        
-        keyboard = [
-            [InlineKeyboardButton("➕ Add Another Episode", callback_data='ott_add_episode')],
-            [InlineKeyboardButton("➕ Add Another Season", callback_data='ott_add_season')],
-            [InlineKeyboardButton("✅ Done", callback_data='ott_done')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        context.user_data[OTT_STATE] = 'awaiting_action'
-        await message.reply_text(
-            f"✅ Episode '{episode['episode_name']}' added.\n\n"
-            f"What would you like to do next?",
-            reply_markup=reply_markup
-        )
-    
-    elif state == 'awaiting_action':
-        query = update.callback_query
-        if not query:
-            return
-
-        if query.data == 'ott_add_episode':
-            context.user_data[OTT_STATE] = 'awaiting_episode_name'
-            await query.edit_message_text("🎬 Please send the **name of the next episode**.")
-        
-        elif query.data == 'ott_add_season':
-            context.user_data[OTT_STATE] = 'awaiting_season_name'
-            await query.edit_message_text("📺 Please send the **name of the next season**.")
-        
-        elif query.data == 'ott_done':
-            ott_data['type'] = 'series'
-            await ott_collection.insert_one(ott_data)
-            
-            await query.edit_message_text(
-                f"✅ **Series '{ott_data['name']}' added successfully!**\n\n"
-                f"Use /start to return to the main menu.",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            context.user_data.pop(OTT_STATE)
-            context.user_data.pop(OTT_TYPE)
-            context.user_data.pop(OTT_DATA)
-
-async def cleanup_expired_shares(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Cleanup expired share links."""
-    try:
-        result = await shared_videos_collection.delete_many({
-            'expires_at': {'$lt': datetime.datetime.now()}
-        })
-        if result.deleted_count > 0:
-            logger.info(f"Cleaned up {result.deleted_count} expired share links")
-    except Exception as e:
-        logger.error(f"Error cleaning up expired shares: {e}")
-
-# Add error handler
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Log the error and send a telegram message to notify the developer."""
-    logger.error(f"Update {update} caused error {context.error}")
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    Handles startup and shutdown events for the FastAPI application.
-    """
-    global application
-    
-    # Startup tasks
-    logger.info("Application startup initiated.")
-    mongodb_connected = await connect_to_mongodb()
-    
-    if not mongodb_connected:
-        logger.error("Failed to connect to MongoDB, shutting down.")
-        return
-
-    application = (
-        Application.builder()
-        .token(API_TOKEN)
-        .build()
-    )
-
-    # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("stats", stats))
-    application.add_handler(CommandHandler("cancel", cancel_operation))
-    application.add_handler(CallbackQueryHandler(button))
-    application.add_handler(MessageHandler(filters.VIDEO, upload_video))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
-    
-    # Add error handler
-    application.add_error_handler(error_handler)
-    
-    if application.job_queue:
-        application.job_queue.run_repeating(cleanup_expired_shares, interval=3600, first=3600)
-        application.job_queue.run_repeating(lambda context: logger.info("Bot is running..."), interval=3600, first=3600)
-    
-    # Initialize and start the application
-    await application.initialize()
-    await application.start()
-    
-    # Set webhook with retry logic and proper error handling
-    if WEBHOOK_URL:
-        try:
-            await set_webhook_with_retry(application.bot, WEBHOOK_URL)
-        except Exception as e:
-            logger.error(f"Failed to set webhook after retries: {e}")
-            # Don't fail startup - continue without webhook
-    else:
-        logger.warning("No webhook URL provided, running without webhook")
-    
-    logger.info("Bot started successfully.")
-    yield # Application is now running
-    
-    # Shutdown tasks
-    logger.info("Application shutdown initiated.")
-    try:
-        await application.stop()
-        await application.shutdown()
-    except Exception as e:
-        logger.error(f"Error during application shutdown: {e}")
-    
-    if db_client:
-        db_client.close()
-    logger.info("Bot stopped and MongoDB connection closed.")
-
-app = FastAPI(lifespan=lifespan)
-
-# Add CORS middleware to allow frontend access
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific domains
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-@app.post("/")
-async def telegram_webhook(request: Request):
-    """Handles incoming Telegram webhook updates."""
-    try:
-        update_json = await request.json()
-        logger.info(f"Received webhook update: {update_json}")
-        update = Update.de_json(update_json, application.bot)
-        await application.process_update(update)
-        return {"message": "ok"}
-    except Exception as e:
-        logger.error(f"Error processing webhook update: {e}")
-        return {"error": "Failed to process update"}
-
-@app.get("/ott_content")
-async def get_ott_content():
-    """
-    HTTP GET endpoint to retrieve all OTT content from the database.
-    This will be called by the frontend web page.
-    """
-    if not ott_collection:
-        return JSONResponse(
-            status_code=503,
-            content={"error": "Database not initialized"}
-        )
-
-    try:
-        cursor = ott_collection.find({})
-        ott_content_list = []
-        async for doc in cursor:
-            doc['_id'] = str(doc['_id'])
-            ott_content_list.append(doc)
-        
-        return JSONResponse(content=ott_content_list)
-    
-    except Exception as e:
-        logger.error(f"Error fetching OTT content: {e}")
-        return JSONResponse(
-            status_code=500,
-            content={"error": "Failed to fetch content"}
-        )
-
-@app.get("/")
-async def root():
-    """Root endpoint that serves a simple HTML page"""
-    html_content = """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Telegram Bot Status</title>
-        <style>
-            body {
-                font-family: Arial, sans-serif;
-                max-width: 800px;
-                margin: 0 auto;
-                padding: 20px;
-                background-color: #f5f5f5;
-            }
-            .container {
-                background: white;
-                padding: 30px;
-                border-radius: 10px;
-                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            }
-            .status {
-                color: #28a745;
-                font-size: 24px;
-                margin-bottom: 20px;
-            }
-            .info {
-                background-color: #e9ecef;
-                padding: 15px;
-                border-radius: 5px;
-                margin: 10px 0;
-            }
-            .endpoints {
-                margin-top: 30px;
-            }
-            .endpoint {
-                background-color: #f8f9fa;
-                padding: 10px;
-                margin: 10px 0;
-                border-left: 4px solid #007bff;
-                border-radius: 3px;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>🤖 Telegram Bot Status</h1>
-            <div class="status">✅ Bot is running successfully!</div>
-            
-            <div class="info">
-                <h3>📊 Bot Information</h3>
-                <p><strong>Status:</strong> Active and ready to receive messages</p>
-                <p><strong>Features:</strong> Video sharing, Upload, Trending content, Share links, OTT content management</p>
-                <p><strong>Database:</strong> MongoDB connected</p>
-            </div>
-            
-            <div class="endpoints">
-                <h3>🔗 Available Endpoints</h3>
-                <div class="endpoint">
-                    <strong>GET /</strong> - This status page
-                </div>
-                <div class="endpoint">
-                    <strong>POST /</strong> - Telegram webhook endpoint
-                </div>
-                <div class="endpoint">
-                    <strong>GET /ott_content</strong> - Fetch OTT content (JSON API)
-                </div>
-            </div>
-            
-            <div class="info">
-                <h3>🚀 How to use</h3>
-                <p>Start a conversation with your bot on Telegram and use the /start command to access all features.</p>
-            </div>
-        </div>
-    </body>
-    </html>
-    """
-    return HTMLResponse(content=html_content, status_code=200)
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint for monitoring"""
-    try:
-        # Check if bot is initialized
-        if not application:
-            return JSONResponse(
-                status_code=503,
-                content={"status": "unhealthy", "error": "Bot not initialized"}
-            )
-        
-        # Check database connection
-        if not db_client:
-            return JSONResponse(
-                status_code=503,
-                content={"status": "unhealthy", "error": "Database not connected"}
-            )
-        
-        # Try to ping the database
-        await db_client.admin.command('ping')
-        
-        return JSONResponse(content={
-            "status": "healthy",
-            "bot_initialized": True,
-            "database_connected": True,
-            "timestamp": datetime.datetime.now().isoformat()
-        })
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        return JSONResponse(
-            status_code=503,
-            content={"status": "unhealthy", "error": str(e)}
-        )
-
-def main() -> None:
-    """Starts the application using uvicorn."""
-    if not API_TOKEN:
-        logger.error("TELEGRAM_API_TOKEN not found in environment variables.")
-        return
-    
-    if not WEBHOOK_URL:
-        logger.warning("WEBHOOK_URL not found. Bot will run without webhook.")
-    
-    if not BOT_USERNAME:
-        logger.warning("BOT_USERNAME not found. Share links may not work properly.")
-    
-    logger.info(f"Starting bot on {LISTEN_ADDRESS}:{PORT}")
-    uvicorn.run("bot:app", host=LISTEN_ADDRESS, port=PORT, log_level="info", reload=False)
-
-if __name__ == '__main__':
-    try:
-        main()
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        raise"
+        caption = update.message.caption if update.message.caption else ""
         
         tags = re.findall(r'#(\w+)', caption)
         
@@ -1181,22 +678,465 @@ async def handle_broadcast_setup(query, context):
                  "Please send the video you want to broadcast to all users."
         )
 
+# Continuing from the cut-off point in handle_admin_content function
+
 async def handle_admin_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles admin-specific content, like broadcast messages and trending videos."""
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
         return
 
+    # Handle broadcast text messages
     if context.user_data.get('broadcast_mode') == 'text' and update.message.text:
         message_text = update.message.text
         await broadcast_message(context, message_text)
         del context.user_data['broadcast_mode']
+        await update.message.reply_text("✅ Text broadcast completed!")
     
+    # Handle broadcast video messages
     elif context.user_data.get('broadcast_mode') == 'video' and update.message.video:
         video_file_id = update.message.video.file_id
-        await broadcast_video(context, video_file_id)
+        caption = update.message.caption if update.message.caption else ""
+        await broadcast_video(context, video_file_id, caption)
         del context.user_data['broadcast_mode']
-
+        await update.message.reply_text("✅ Video broadcast completed!")
+    
+    # Handle trending video additions
     elif context.user_data.get('trending_mode') and update.message.video:
-        video_file_id = update.message.video.file_id
-        caption = update.message.caption if update.message.caption else "
+        try:
+            video_file_id = update.message.video.file_id
+            caption = update.message.caption if update.message.caption else ""
+            tags = re.findall(r'#(\w+)', caption)
+            
+            video_doc = {
+                'file_id': video_file_id,
+                'caption': caption,
+                'uploader_id': user_id,
+                'upload_date': datetime.datetime.now(),
+                'tags': tags,
+                'views': 0,
+                'is_trending': True
+            }
+            
+            await videos_collection.insert_one(video_doc)
+            del context.user_data['trending_mode']
+            await update.message.reply_text("✅ Video added to trending list!")
+        except Exception as e:
+            logger.error(f"Error adding trending video: {e}")
+            await update.message.reply_text("❌ Error adding video to trending list.")
+    
+    # Handle OTT content addition workflow
+    elif context.user_data.get(OTT_STATE):
+        await handle_ott_workflow(update, context)
+
+async def handle_ott_workflow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the OTT content addition workflow."""
+    state = context.user_data.get(OTT_STATE)
+    content_type = context.user_data.get(OTT_TYPE)
+    ott_data = context.user_data.get(OTT_DATA, {})
+    
+    try:
+        if state == 'awaiting_name':
+            ott_data['name'] = update.message.text
+            context.user_data[OTT_DATA] = ott_data
+            context.user_data[OTT_STATE] = 'awaiting_description'
+            
+            await update.message.reply_text(
+                f"📝 **Add Description**\n\n"
+                f"Now send the description for **{ott_data['name']}**"
+            )
+        
+        elif state == 'awaiting_description':
+            ott_data['description'] = update.message.text
+            context.user_data[OTT_DATA] = ott_data
+            context.user_data[OTT_STATE] = 'awaiting_genre'
+            
+            await update.message.reply_text(
+                f"🎭 **Add Genre**\n\n"
+                f"Send the genre(s) for **{ott_data['name']}**\n"
+                f"(e.g., Action, Comedy, Drama)"
+            )
+        
+        elif state == 'awaiting_genre':
+            ott_data['genre'] = update.message.text
+            context.user_data[OTT_DATA] = ott_data
+            context.user_data[OTT_STATE] = 'awaiting_year'
+            
+            await update.message.reply_text(
+                f"📅 **Add Release Year**\n\n"
+                f"Send the release year for **{ott_data['name']}**"
+            )
+        
+        elif state == 'awaiting_year':
+            try:
+                year = int(update.message.text)
+                ott_data['year'] = year
+                context.user_data[OTT_DATA] = ott_data
+                context.user_data[OTT_STATE] = 'awaiting_link'
+                
+                await update.message.reply_text(
+                    f"🔗 **Add Download Link**\n\n"
+                    f"Send the download link for **{ott_data['name']}**"
+                )
+            except ValueError:
+                await update.message.reply_text("❌ Please send a valid year (e.g., 2023)")
+        
+        elif state == 'awaiting_link':
+            ott_data['download_link'] = update.message.text
+            ott_data['content_type'] = content_type
+            ott_data['added_by'] = update.message.from_user.id
+            ott_data['added_date'] = datetime.datetime.now()
+            ott_data['views'] = 0
+            
+            # Save to database
+            await ott_collection.insert_one(ott_data)
+            
+            # Clear user data
+            del context.user_data[OTT_STATE]
+            del context.user_data[OTT_TYPE]
+            del context.user_data[OTT_DATA]
+            
+            # Send confirmation
+            confirmation_text = (
+                f"✅ **{content_type.capitalize()} Added Successfully!**\n\n"
+                f"**Name:** {ott_data['name']}\n"
+                f"**Genre:** {ott_data['genre']}\n"
+                f"**Year:** {ott_data['year']}\n"
+                f"**Description:** {ott_data['description'][:100]}..."
+            )
+            
+            await update.message.reply_text(confirmation_text, parse_mode=ParseMode.MARKDOWN)
+            
+    except Exception as e:
+        logger.error(f"Error in OTT workflow: {e}")
+        await update.message.reply_text("❌ Error processing OTT content.")
+
+async def broadcast_message(context: ContextTypes.DEFAULT_TYPE, message: str) -> None:
+    """Broadcasts a text message to all users."""
+    try:
+        users = await users_collection.find().to_list(length=None)
+        success_count = 0
+        error_count = 0
+        
+        for user_doc in users:
+            try:
+                await context.bot.send_message(
+                    chat_id=user_doc['user_id'],
+                    text=f"📢 **Broadcast Message**\n\n{message}",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                success_count += 1
+                await asyncio.sleep(0.05)  # Rate limiting
+            except Exception as e:
+                logger.error(f"Failed to send broadcast to user {user_doc['user_id']}: {e}")
+                error_count += 1
+        
+        logger.info(f"Broadcast completed: {success_count} sent, {error_count} failed")
+    except Exception as e:
+        logger.error(f"Error in broadcast_message: {e}")
+
+async def broadcast_video(context: ContextTypes.DEFAULT_TYPE, video_file_id: str, caption: str = "") -> None:
+    """Broadcasts a video to all users."""
+    try:
+        users = await users_collection.find().to_list(length=None)
+        success_count = 0
+        error_count = 0
+        
+        broadcast_caption = f"📢 **Broadcast Video**\n\n{caption}" if caption else "📢 **Broadcast Video**"
+        
+        for user_doc in users:
+            try:
+                await context.bot.send_video(
+                    chat_id=user_doc['user_id'],
+                    video=video_file_id,
+                    caption=broadcast_caption,
+                    parse_mode=ParseMode.MARKDOWN,
+                    protect_content=True
+                )
+                success_count += 1
+                await asyncio.sleep(0.05)  # Rate limiting
+            except Exception as e:
+                logger.error(f"Failed to send broadcast video to user {user_doc['user_id']}: {e}")
+                error_count += 1
+        
+        logger.info(f"Video broadcast completed: {success_count} sent, {error_count} failed")
+    except Exception as e:
+        logger.error(f"Error in broadcast_video: {e}")
+
+async def search_videos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles video search command."""
+    if not context.args:
+        await update.message.reply_text(
+            "🔎 **Video Search**\n\n"
+            "Usage: `/search <keyword>`\n"
+            "Example: `/search funny cats`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    search_query = ' '.join(context.args).lower()
+    
+    try:
+        # Search in captions and tags
+        search_filter = {
+            '$or': [
+                {'caption': {'$regex': search_query, '$options': 'i'}},
+                {'tags': {'$in': [search_query]}}
+            ]
+        }
+        
+        videos = await videos_collection.find(search_filter).limit(5).to_list(length=None)
+        
+        if not videos:
+            await update.message.reply_text(
+                f"😔 **No videos found**\n\n"
+                f"No videos found for: *{search_query}*",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        await update.message.reply_text(
+            f"🔎 **Search Results** ({len(videos)} found)\n\n"
+            f"Query: *{search_query}*",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        for video_doc in videos:
+            caption_text = f"🎥 **Search Result**\n\n"
+            if video_doc.get('caption'):
+                caption_text += f"{video_doc['caption']}\n\n"
+            caption_text += f"**Views:** {video_doc.get('views', 0)}"
+            
+            sent_message = await context.bot.send_video(
+                chat_id=update.message.chat_id,
+                video=video_doc['file_id'],
+                caption=caption_text,
+                protect_content=True,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            # Auto-delete after 5 minutes
+            context.job_queue.run_once(
+                delete_message,
+                300,
+                data={'chat_id': update.message.chat_id, 'message_id': sent_message.message_id}
+            )
+            
+    except Exception as e:
+        logger.error(f"Error in search_videos: {e}")
+        await update.message.reply_text("❌ An error occurred while searching for videos.")
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Cancels current operation."""
+    user_data_keys = ['upload_mode', 'broadcast_mode', 'trending_mode', OTT_STATE, OTT_TYPE, OTT_DATA]
+    
+    cancelled_operations = []
+    for key in user_data_keys:
+        if key in context.user_data:
+            del context.user_data[key]
+            cancelled_operations.append(key)
+    
+    if cancelled_operations:
+        await update.message.reply_text("✅ Current operation cancelled.")
+    else:
+        await update.message.reply_text("ℹ️ No active operation to cancel.")
+
+async def delete_message(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Deletes a message after a delay."""
+    try:
+        job_data = context.job.data
+        await context.bot.delete_message(
+            chat_id=job_data['chat_id'],
+            message_id=job_data['message_id']
+        )
+    except Exception as e:
+        logger.error(f"Error deleting message: {e}")
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log errors caused by Updates."""
+    logger.error(f'Update {update} caused error {context.error}')
+
+# FastAPI application setup
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage the application lifecycle."""
+    logger.info("Starting application...")
+    
+    # Connect to MongoDB
+    if not await connect_to_mongodb():
+        logger.error("Failed to connect to MongoDB. Exiting.")
+        return
+    
+    # Initialize Telegram bot
+    global application
+    application = Application.builder().token(API_TOKEN).build()
+    
+    # Add handlers
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('search', search_videos))
+    application.add_handler(CommandHandler('cancel', cancel_command))
+    application.add_handler(CallbackQueryHandler(button))
+    application.add_handler(MessageHandler(filters.VIDEO, upload_video))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_content))
+    application.add_error_handler(error_handler)
+    
+    # Initialize the application
+    await application.initialize()
+    await application.start()
+    
+    # Set webhook if URL is provided
+    if WEBHOOK_URL:
+        try:
+            await set_webhook_with_retry(application.bot, WEBHOOK_URL)
+        except Exception as e:
+            logger.error(f"Failed to set webhook: {e}")
+            await application.stop()
+            return
+    else:
+        logger.warning("No WEBHOOK_URL provided. Bot will not receive updates.")
+    
+    logger.info("Application started successfully!")
+    
+    yield
+    
+    # Cleanup
+    logger.info("Shutting down application...")
+    if application:
+        await application.stop()
+        await application.shutdown()
+    if db_client:
+        db_client.close()
+    logger.info("Application shut down complete!")
+
+# Create FastAPI app
+app = FastAPI(lifespan=lifespan, title="Telegram Video Bot", version="1.0.0")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    """Root endpoint with basic info."""
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Telegram Video Bot</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 40px; background-color: #f5f5f5; }
+            .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+            h1 { color: #2c3e50; text-align: center; }
+            .status { padding: 10px; border-radius: 5px; margin: 10px 0; }
+            .online { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+            .info { background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+            .feature { padding: 8px; margin: 5px 0; background-color: #f8f9fa; border-left: 4px solid #007bff; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🤖 Telegram Video Bot</h1>
+            <div class="status online">✅ Bot is running and operational</div>
+            <div class="info">📡 Webhook configured and ready to receive updates</div>
+            
+            <h3>🌟 Features:</h3>
+            <div class="feature">🎥 Random video sharing with daily limits</div>
+            <div class="feature">🔎 Video search functionality</div>
+            <div class="feature">📤 Video upload for users</div>
+            <div class="feature">🔥 Trending videos section</div>
+            <div class="feature">🔗 Shareable video links</div>
+            <div class="feature">📡 Admin broadcast system</div>
+            <div class="feature">🎬 OTT content management</div>
+            <div class="feature">📊 Usage statistics and analytics</div>
+            <div class="feature">🛡️ Content protection and auto-deletion</div>
+            
+            <div class="info">
+                <strong>Bot Username:</strong> @{bot_username}<br>
+                <strong>Daily Limit:</strong> {daily_limit} videos per user<br>
+                <strong>Auto-delete:</strong> 5 minutes
+            </div>
+        </div>
+    </body>
+    </html>
+    """.format(bot_username=BOT_USERNAME, daily_limit=DAILY_LIMIT)
+
+@app.post(f"/webhook")
+async def webhook_handler(request: Request):
+    """Handle incoming webhook updates from Telegram."""
+    try:
+        # Get the raw body
+        body = await request.body()
+        
+        # Parse the update
+        update = Update.de_json(body.decode('utf-8'), application.bot)
+        
+        if update:
+            # Process the update
+            await application.process_update(update)
+            return JSONResponse({"status": "ok"})
+        else:
+            logger.warning("Received invalid update")
+            return JSONResponse({"status": "error", "message": "Invalid update"}, status_code=400)
+            
+    except Exception as e:
+        logger.error(f"Error processing webhook: {e}")
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint."""
+    try:
+        # Check MongoDB connection
+        await db_client.admin.command('ping')
+        
+        # Check bot connection
+        bot_info = await application.bot.get_me()
+        
+        return JSONResponse({
+            "status": "healthy",
+            "bot_username": bot_info.username,
+            "database": "connected",
+            "timestamp": datetime.datetime.now().isoformat()
+        })
+    except Exception as e:
+        return JSONResponse({
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.datetime.now().isoformat()
+        }, status_code=503)
+
+@app.get("/stats")
+async def get_stats():
+    """Get bot statistics."""
+    try:
+        stats = {
+            "total_users": await users_collection.count_documents({}),
+            "total_videos": await videos_collection.count_documents({}),
+            "trending_videos": await videos_collection.count_documents({"is_trending": True}),
+            "total_shares": await shared_videos_collection.count_documents({}),
+            "active_shares": await shared_videos_collection.count_documents({
+                "expires_at": {"$gt": datetime.datetime.now()}
+            }),
+            "ott_content": await ott_collection.count_documents({}),
+            "daily_limit": DAILY_LIMIT,
+            "timestamp": datetime.datetime.now().isoformat()
+        }
+        
+        return JSONResponse(stats)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+if __name__ == '__main__':
+    logger.info(f"Starting server on {LISTEN_ADDRESS}:{PORT}")
+    uvicorn.run(
+        "bot:app",
+        host=LISTEN_ADDRESS,
+        port=PORT,
+        reload=False,
+        log_level="info"
+    )
