@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse
 from contextlib import asynccontextmanager
 import warnings
+from bson import ObjectId
 
 # Suppress PTBUserWarning for webhook updates
 warnings.filterwarnings("ignore", category=PTBUserWarning)
@@ -191,466 +192,7 @@ async def handle_shared_video_access(update: Update, context: ContextTypes.DEFAU
         })
         
         if not share_doc:
-            await update.message.reply_text(
-                "❌ **Invalid or Expired Link**\n\n"
-                "This video share link is either invalid or has expired.\n"
-                "Share links expire after 7 days.",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return
-        
-        await shared_videos_collection.update_one(
-            {'token': share_token},
-            {'$inc': {'access_count': 1}}
-        )
-        
-        await update.message.reply_text("🎥 **Shared Video:**")
-        sent_message = await context.bot.send_video(
-            chat_id=update.message.chat_id,
-            video=share_doc['file_id'],
-            caption=f"📤 Shared by user {share_doc['shared_by']}\n🔢 Access count: {share_doc['access_count'] + 1}",
-            protect_content=True
-        )
-        
-        context.job_queue.run_once(
-            delete_message,
-            300,
-            data={'chat_id': update.message.chat_id, 'message_id': sent_message.message_id}
-        )
-        
-        keyboard = [
-            [
-                InlineKeyboardButton("🎥 Random Video", callback_data='get_video'),
-                InlineKeyboardButton("🔎 Search Videos", callback_data='search_menu')
-            ],
-            [
-                InlineKeyboardButton("📤 Upload Video", callback_data='upload_video'),
-                InlineKeyboardButton("🔥 Trending Videos", callback_data='trending_videos')
-            ],
-            [InlineKeyboardButton("🔗 Get Share Link", callback_data='get_share_link')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(
-            "✅ Enjoy the video! Use the buttons below for more options:",
-            reply_markup=reply_markup
-        )
-        
-    except Exception as e:
-        logger.error(f"Error handling shared video access: {e}")
-        await update.message.reply_text("❌ Error accessing shared video.")
-
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles button presses from the inline keyboard."""
-    query = update.callback_query
-    await query.answer()
-    
-    logger.info(f"Button pressed: {query.data} by user {query.from_user.id}")
-
-    if query.data == 'get_video':
-        await handle_get_video(query, context)
-    
-    elif query.data == 'get_share_link':
-        await handle_get_share_link(query, context)
-
-    elif query.data == 'upload_video':
-        await query.edit_message_text(
-            text="🎥 **Upload Video**\n\n"
-                 "Please send me the video you want to upload.\n\n"
-                 "💡 **Tip:** Add a caption and tags (e.g., `#funny #cat`) to make it searchable!",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        context.user_data['upload_mode'] = True
-
-    elif query.data == 'trending_videos':
-        await handle_trending_videos(query, context)
-
-    elif query.data == 'search_menu':
-        await query.edit_message_text(
-            text="🔎 **Video Search**\n\n"
-                 "To search for a video, use the `/search <keyword>` command.\n\n"
-                 "Example: `/search funny cats`",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    
-    elif query.data == 'ott_menu':
-        if not ADMIN_ID or query.from_user.id != ADMIN_ID:
-            await query.edit_message_text(text="❌ Access denied. Admin only.")
-            return
-        
-        keyboard = [
-            [InlineKeyboardButton("🎬 Add Movie", callback_data='ott_add_movie')],
-            [InlineKeyboardButton("📺 Add Series", callback_data='ott_add_series')],
-            [InlineKeyboardButton("🔙 Back to Admin", callback_data='admin_panel')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            text="➕ **Add New OTT Content**\n\nChoose content type:",
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
-        )
-
-    elif query.data in ['ott_add_movie', 'ott_add_series']:
-        await handle_add_ott_content(query, context)
-    
-    elif query.data == 'admin_panel':
-        if not ADMIN_ID or query.from_user.id != ADMIN_ID:
-            await query.edit_message_text(text="❌ Access denied. Admin only.")
-            return
-            
-        admin_keyboard = [
-            [
-                InlineKeyboardButton("📡 Broadcast", callback_data='broadcast_menu'),
-                InlineKeyboardButton("📊 Statistics", callback_data='admin_stats')
-            ],
-            [
-                InlineKeyboardButton("🔥 Manage Trending", callback_data='manage_trending'),
-                InlineKeyboardButton("🔗 Share Statistics", callback_data='share_stats')
-            ],
-            [
-                InlineKeyboardButton("🎬 OTT Content", callback_data='ott_menu'),
-                InlineKeyboardButton("🔙 Back to Main", callback_data='back_to_main')
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(admin_keyboard)
-        
-        await query.edit_message_text(
-            text="🛠 **Admin Panel**\n\nChoose an option:",
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
-        )
-
-    elif query.data == 'manage_trending':
-        if not ADMIN_ID or query.from_user.id != ADMIN_ID:
-            await query.edit_message_text(text="❌ Access denied.")
-            return
-        
-        context.user_data['trending_mode'] = True
-        await query.edit_message_text(
-            text="🔥 **Add Trending Video**\n\n"
-                 "Send me a video to add to trending list.\n\n"
-                 "Use /cancel to cancel this operation."
-        )
-
-    elif query.data == 'share_stats':
-        if not ADMIN_ID or query.from_user.id != ADMIN_ID:
-            await query.edit_message_text(text="❌ Access denied.")
-            return
-        
-        try:
-            total_shares = await shared_videos_collection.count_documents({})
-            active_shares = await shared_videos_collection.count_documents({
-                'expires_at': {'$gt': datetime.datetime.now()}
-            })
-            expired_shares = total_shares - active_shares
-            
-            pipeline = [
-                {'$match': {'expires_at': {'$gt': datetime.datetime.now()}}},
-                {'$sort': {'access_count': -1}},
-                {'$limit': 5}
-            ]
-            
-            top_shares = []
-            async for doc in shared_videos_collection.aggregate(pipeline):
-                top_shares.append(f"• Token: `{doc['token'][:8]}`... - {doc['access_count']} accesses")
-            
-            stats_text = f"🔗 **Share Statistics**\n\n"
-            stats_text += f"📊 Total shares created: {total_shares}\n"
-            stats_text += f"✅ Active shares: {active_shares}\n"
-            stats_text += f"❌ Expired shares: {expired_shares}\n\n"
-            
-            if top_shares:
-                stats_text += "🔥 **Top Accessed Shares:**\n"
-                stats_text += "\n".join(top_shares[:3])
-            
-            back_keyboard = [[InlineKeyboardButton("🔙 Back to Admin", callback_data='admin_panel')]]
-            reply_markup = InlineKeyboardMarkup(back_keyboard)
-            
-            await query.edit_message_text(
-                text=stats_text,
-                reply_markup=reply_markup,
-                parse_mode=ParseMode.MARKDOWN
-            )
-        except Exception as e:
-            logger.error(f"Error in share_stats: {e}")
-            await query.edit_message_text(text="❌ Error loading share statistics.")
-
-    elif query.data == 'broadcast_menu':
-        if not ADMIN_ID or query.from_user.id != ADMIN_ID:
-            await query.edit_message_text(text="❌ Access denied.")
-            return
-            
-        broadcast_keyboard = [
-            [InlineKeyboardButton("📝 Text Message", callback_data='broadcast_text')],
-            [InlineKeyboardButton("🎥 Video Broadcast", callback_data='broadcast_video')],
-            [InlineKeyboardButton("🔙 Back to Admin", callback_data='admin_panel')]
-        ]
-        reply_markup = InlineKeyboardMarkup(broadcast_keyboard)
-        
-        await query.edit_message_text(
-            text="📡 **Broadcast Menu**\n\n"
-                 "Choose the type of content to broadcast:",
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
-        )
-
-    elif query.data in ['broadcast_text', 'broadcast_video']:
-        await handle_broadcast_setup(query, context)
-
-    elif query.data == 'admin_stats':
-        if not ADMIN_ID or query.from_user.id != ADMIN_ID:
-            await query.edit_message_text(text="❌ Access denied.")
-            return
-            
-        try:
-            total_users = await users_collection.count_documents({})
-            total_videos = await videos_collection.count_documents({})
-            trending_count = await videos_collection.count_documents({'is_trending': True})
-            total_shares = await shared_videos_collection.count_documents({})
-            active_shares = await shared_videos_collection.count_documents({
-                'expires_at': {'$gt': datetime.datetime.now()}
-            })
-
-            today_iso = datetime.date.today().isoformat()
-            active_today = await users_collection.count_documents({
-                'last_reset': today_iso,
-                'daily_count': {'$gt': 0}
-            })
-            
-            stats_text = f"📊 **Bot Statistics**\n\n"
-            stats_text += f"👥 Total users: {total_users}\n"
-            stats_text += f"🔥 Active today: {active_today}\n"
-            stats_text += f"🎥 Total videos: {total_videos}\n"
-            stats_text += f"⭐ Trending videos: {trending_count}\n"
-            stats_text += f"🔗 Total shares created: {total_shares}\n"
-            stats_text += f"✅ Active shares: {active_shares}\n"
-            stats_text += f"⚙️ Daily limit: {DAILY_LIMIT}\n"
-            stats_text += f"🤖 Auto-delete: 5 minutes"
-            
-            back_keyboard = [[InlineKeyboardButton("🔙 Back to Admin", callback_data='admin_panel')]]
-            reply_markup = InlineKeyboardMarkup(back_keyboard)
-            
-            await query.edit_message_text(
-                text=stats_text,
-                reply_markup=reply_markup,
-                parse_mode=ParseMode.MARKDOWN
-            )
-        except Exception as e:
-            logger.error(f"Error in admin_stats: {e}")
-            await query.edit_message_text(text="❌ Error loading statistics.")
-
-    elif query.data == 'back_to_main':
-        user = query.from_user
-        welcome_message = f"Welcome back, {user.mention_markdown_v2()}\\!\n\n"
-        welcome_message += f"Your User ID: `{user.id}`\n\n"
-        welcome_message += "This bot shares random videos from our collection\\.\n"
-        welcome_message += "Use the buttons below to get videos or upload new ones\\."
-
-        keyboard = [
-            [
-                InlineKeyboardButton("🎥 Random Video", callback_data='get_video'),
-                InlineKeyboardButton("🔎 Search Videos", callback_data='search_menu')
-            ],
-            [
-                InlineKeyboardButton("📤 Upload Video", callback_data='upload_video'),
-                InlineKeyboardButton("🔥 Trending Videos", callback_data='trending_videos')
-            ],
-            [InlineKeyboardButton("🔗 Get Share Link", callback_data='get_share_link')]
-        ]
-        
-        if ADMIN_ID and user.id == ADMIN_ID:
-            keyboard.append([InlineKeyboardButton("📡 Admin Panel", callback_data='admin_panel')])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await query.edit_message_text(welcome_message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
-
-async def handle_add_ott_content(query, context):
-    """Admin entry point to add a new movie or series."""
-    if not ADMIN_ID or query.from_user.id != ADMIN_ID:
-        await query.edit_message_text(text="❌ Access denied. Admin only.")
-        return
-
-    content_type = 'movie' if query.data == 'ott_add_movie' else 'series'
-    context.user_data[OTT_STATE] = 'awaiting_name'
-    context.user_data[OTT_TYPE] = content_type
-    context.user_data[OTT_DATA] = {}
-
-    await query.edit_message_text(
-        f"📝 **Add New {content_type.capitalize()}**\n\n"
-        f"Please send the **name** of the {content_type}."
-    )
-
-async def handle_get_video(query, context):
-    """Handles getting a random video from the database."""
-    user = query.from_user
-    user_id = user.id
-    try:
-        user_doc = await users_collection.find_one({'user_id': user_id})
-        
-        today_iso = datetime.date.today().isoformat()
-        
-        if not user_doc or user_doc.get('last_reset') != today_iso:
-            await users_collection.update_one(
-                {'user_id': user_id},
-                {'$set': {'daily_count': 0, 'last_reset': today_iso, 'user_id': user_id}},
-                upsert=True
-            )
-            daily_count = 0
-        else:
-            daily_count = user_doc['daily_count']
-
-        if daily_count >= DAILY_LIMIT:
-            await query.edit_message_text(
-                f"🚫 **Daily Limit Reached**\n\n"
-                f"You have reached your daily limit of {DAILY_LIMIT} videos.\n"
-                f"Your limit will reset tomorrow\\. Enjoy your day\\! ✨",
-                parse_mode=ParseMode.MARKDOWN_V2
-            )
-            return
-
-        videos = await videos_collection.find().to_list(length=None)
-        if not videos:
-            await query.edit_message_text("😔 **No videos found!**\n\nCome back later.")
-            return
-
-        video_doc = random.choice(videos)
-        
-        await users_collection.update_one(
-            {'user_id': user_id},
-            {'$inc': {'daily_count': 1}}
-        )
-        
-        caption_text = f"🎥 **Video**\n\n"
-        if 'caption' in video_doc:
-            caption_text += f"{video_doc['caption']}\n\n"
-        caption_text += f"**Views:** {video_doc.get('views', 0) + 1}\n"
-        
-        keyboard = [
-            [InlineKeyboardButton("🔄 Get another video", callback_data='get_video')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        sent_message = await context.bot.send_video(
-            chat_id=query.message.chat_id,
-            video=video_doc['file_id'],
-            caption=caption_text,
-            protect_content=True,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
-        )
-
-        await videos_collection.update_one(
-            {'_id': video_doc['_id']},
-            {'$inc': {'views': 1}}
-        )
-
-        context.job_queue.run_once(
-            delete_message,
-            300,
-            data={'chat_id': query.message.chat_id, 'message_id': sent_message.message_id}
-        )
-        await query.message.delete()
-        
-    except Exception as e:
-        logger.error(f"Error handling get_video: {e}")
-        await query.edit_message_text("❌ An error occurred while fetching the video.")
-
-async def handle_get_share_link(query, context):
-    """Handles creating a share link for a random video."""
-    try:
-        videos = await videos_collection.find().to_list(length=None)
-        if not videos:
-            await query.edit_message_text("😔 No videos found to share.")
-            return
-            
-        video_doc = random.choice(videos)
-        
-        share_url = await create_share_url(video_doc, query.from_user.id)
-        if share_url:
-            await query.edit_message_text(
-                f"🔗 **Share Link Created!**\n\n"
-                f"Share this link with your friends to give them access to this video:\n\n"
-                f"`{share_url}`\n\n"
-                f"This link is valid for **7 days**.",
-                parse_mode=ParseMode.MARKDOWN
-            )
-        else:
-            await query.edit_message_text("❌ An error occurred while creating the share link.")
-    except Exception as e:
-        logger.error(f"Error handling share link request: {e}")
-        await query.edit_message_text("❌ An error occurred while creating the share link.")
-
-async def handle_trending_videos(query, context):
-    """Handles getting trending videos from the database."""
-    try:
-        trending_videos = await videos_collection.find(
-            {'is_trending': True}
-        ).to_list(length=None)
-
-        if not trending_videos:
-            await query.edit_message_text("🔥 **No trending videos found!**\n\nCheck back later.")
-            return
-
-        for video_doc in trending_videos:
-            caption_text = f"🔥 **Trending Video**\n\n"
-            if 'caption' in video_doc:
-                caption_text += f"{video_doc['caption']}\n\n"
-            caption_text += f"**Views:** {video_doc.get('views', 0)}\n"
-            
-            sent_message = await context.bot.send_video(
-                chat_id=query.message.chat_id,
-                video=video_doc['file_id'],
-                caption=caption_text,
-                protect_content=True,
-                parse_mode=ParseMode.MARKDOWN
-            )
-
-            context.job_queue.run_once(
-                delete_message,
-                300,
-                data={'chat_id': query.message.chat_id, 'message_id': sent_message.message_id}
-            )
-
-        await query.message.reply_text("✅ Enjoy the trending videos!")
-        await query.message.delete()
-
-    except Exception as e:
-        logger.error(f"Error handling trending videos: {e}")
-        await query.message.reply_text("❌ An error occurred while fetching trending videos.")
-
-async def upload_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles incoming video uploads."""
-    user = update.effective_user
-    logger.info(f"Video upload from user {user.id}")
-    
-    if user.id != ADMIN_ID and not context.user_data.get('upload_mode'):
-        await update.message.reply_text(
-            "❌ This bot only accepts videos from the admin or in upload mode. "
-            "Use the '📤 Upload Video' button to start uploading."
-        )
-        return
-        
-    try:
-        video_file_id = update.message.video.file_id
-        caption = update.message.caption if update.message.caption else ""
-        
-        tags = re.findall(r'#(\w+)', caption)
-        
-        video_doc = {
-            'file_id': video_file_id,
-            'caption': caption,
-            'uploader_id': user.id,
-            'upload_date': datetime.datetime.now(),
-            'tags': tags,
-            'views': 0,
-            'is_trending': False
-        }
-
-        await videos_collection.insert_one(video_doc)
-        
-        await update.message.reply_text("✅ Video uploaded successfully!")
+            await update.message.reply_text("✅ Video uploaded successfully!")
         
         if context.user_data.get('upload_mode'):
             del context.user_data['upload_mode']
@@ -677,8 +219,6 @@ async def handle_broadcast_setup(query, context):
             text="🎥 **Broadcast Video**\n\n"
                  "Please send the video you want to broadcast to all users."
         )
-
-# Continuing from the cut-off point in handle_admin_content function
 
 async def handle_admin_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles admin-specific content, like broadcast messages and trending videos."""
@@ -1023,19 +563,19 @@ app.add_middleware(
 @app.get("/", response_class=HTMLResponse)
 async def root():
     """Root endpoint with basic info."""
-    return """
+    return f"""
     <!DOCTYPE html>
     <html>
     <head>
         <title>Telegram Video Bot</title>
         <style>
-            body { font-family: Arial, sans-serif; margin: 40px; background-color: #f5f5f5; }
-            .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-            h1 { color: #2c3e50; text-align: center; }
-            .status { padding: 10px; border-radius: 5px; margin: 10px 0; }
-            .online { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-            .info { background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
-            .feature { padding: 8px; margin: 5px 0; background-color: #f8f9fa; border-left: 4px solid #007bff; }
+            body {{ font-family: Arial, sans-serif; margin: 40px; background-color: #f5f5f5; }}
+            .container {{ max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+            h1 {{ color: #2c3e50; text-align: center; }}
+            .status {{ padding: 10px; border-radius: 5px; margin: 10px 0; }}
+            .online {{ background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }}
+            .info {{ background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }}
+            .feature {{ padding: 8px; margin: 5px 0; background-color: #f8f9fa; border-left: 4px solid #007bff; }}
         </style>
     </head>
     <body>
@@ -1056,14 +596,136 @@ async def root():
             <div class="feature">🛡️ Content protection and auto-deletion</div>
             
             <div class="info">
-                <strong>Bot Username:</strong> @{bot_username}<br>
-                <strong>Daily Limit:</strong> {daily_limit} videos per user<br>
+                <strong>Bot Username:</strong> @{BOT_USERNAME}<br>
+                <strong>Daily Limit:</strong> {DAILY_LIMIT} videos per user<br>
                 <strong>Auto-delete:</strong> 5 minutes
             </div>
         </div>
     </body>
     </html>
-    """.format(bot_username=BOT_USERNAME, daily_limit=DAILY_LIMIT)
+    """
+
+@app.get("/ott-content")
+async def get_ott_content(request: Request):
+    """Get OTT content from the database."""
+    try:
+        # Get query parameters
+        content_type = request.query_params.get('type')  # 'movie' or 'series'
+        genre = request.query_params.get('genre')
+        year = request.query_params.get('year')
+        limit = int(request.query_params.get('limit', 50))
+        
+        # Build filter
+        filter_query = {}
+        if content_type:
+            filter_query['content_type'] = content_type
+        if genre:
+            filter_query['genre'] = {'$regex': genre, '$options': 'i'}
+        if year:
+            filter_query['year'] = int(year)
+        
+        # Get content from database
+        ott_content = await ott_collection.find(filter_query).limit(limit).to_list(length=None)
+        
+        # Convert ObjectId to string for JSON serialization
+        for content in ott_content:
+            content['_id'] = str(content['_id'])
+            # Convert datetime objects to ISO strings
+            if 'added_date' in content:
+                content['added_date'] = content['added_date'].isoformat()
+        
+        return JSONResponse({
+            "status": "success",
+            "count": len(ott_content),
+            "data": ott_content
+        })
+        
+    except Exception as e:
+        logger.error(f"Error fetching OTT content: {e}")
+        return JSONResponse({
+            "status": "error",
+            "message": str(e)
+        }, status_code=500)
+
+@app.get("/ott-content/{content_id}")
+async def get_ott_content_by_id(content_id: str):
+    """Get specific OTT content by ID."""
+    try:
+        # Find content by ID
+        content = await ott_collection.find_one({"_id": ObjectId(content_id)})
+        
+        if not content:
+            return JSONResponse({
+                "status": "error",
+                "message": "Content not found"
+            }, status_code=404)
+        
+        # Convert ObjectId and datetime for JSON
+        content['_id'] = str(content['_id'])
+        if 'added_date' in content:
+            content['added_date'] = content['added_date'].isoformat()
+        
+        # Increment view count
+        await ott_collection.update_one(
+            {"_id": ObjectId(content_id)},
+            {"$inc": {"views": 1}}
+        )
+        
+        return JSONResponse({
+            "status": "success",
+            "data": content
+        })
+        
+    except Exception as e:
+        logger.error(f"Error fetching OTT content by ID: {e}")
+        return JSONResponse({
+            "status": "error",
+            "message": str(e)
+        }, status_code=500)
+
+@app.post("/ott-content/search")
+async def search_ott_content(request: Request):
+    """Search OTT content by name or description."""
+    try:
+        body = await request.json()
+        search_query = body.get('query', '').strip()
+        
+        if not search_query:
+            return JSONResponse({
+                "status": "error",
+                "message": "Search query is required"
+            }, status_code=400)
+        
+        # Search in name and description
+        filter_query = {
+            '$or': [
+                {'name': {'$regex': search_query, '$options': 'i'}},
+                {'description': {'$regex': search_query, '$options': 'i'}},
+                {'genre': {'$regex': search_query, '$options': 'i'}}
+            ]
+        }
+        
+        results = await ott_collection.find(filter_query).limit(20).to_list(length=None)
+        
+        # Convert ObjectId and datetime for JSON
+        for content in results:
+            content['_id'] = str(content['_id'])
+            if 'added_date' in content:
+                content['added_date'] = content['added_date'].isoformat()
+        
+        return JSONResponse({
+            "status": "success",
+            "query": search_query,
+            "count": len(results),
+            "data": results
+        })
+        
+    except Exception as e:
+        logger.error(f"Error searching OTT content: {e}")
+        return JSONResponse({
+            "status": "error",
+            "message": str(e)
+        }, status_code=500)
 
 @app.post(f"/webhook")
 async def webhook_handler(request: Request):
@@ -1139,4 +801,509 @@ if __name__ == '__main__':
         port=PORT,
         reload=False,
         log_level="info"
+    )text(
+                "❌ **Invalid or Expired Link**\n\n"
+                "This video share link is either invalid or has expired.\n"
+                "Share links expire after 7 days.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        await shared_videos_collection.update_one(
+            {'token': share_token},
+            {'$inc': {'access_count': 1}}
+        )
+        
+        await update.message.reply_text("🎥 **Shared Video:**")
+        sent_message = await context.bot.send_video(
+            chat_id=update.message.chat_id,
+            video=share_doc['file_id'],
+            caption=f"📤 Shared by user {share_doc['shared_by']}\n🔢 Access count: {share_doc['access_count'] + 1}",
+            protect_content=True
+        )
+        
+        context.job_queue.run_once(
+            delete_message,
+            300,
+            data={'chat_id': update.message.chat_id, 'message_id': sent_message.message_id}
+        )
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("🎥 Random Video", callback_data='get_video'),
+                InlineKeyboardButton("🔎 Search Videos", callback_data='search_menu')
+            ],
+            [
+                InlineKeyboardButton("📤 Upload Video", callback_data='upload_video'),
+                InlineKeyboardButton("🔥 Trending Videos", callback_data='trending_videos')
+            ],
+            [InlineKeyboardButton("🔗 Get Share Link", callback_data='get_share_link')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "✅ Enjoy the video! Use the buttons below for more options:",
+            reply_markup=reply_markup
+        )
+        
+    except Exception as e:
+        logger.error(f"Error handling shared video access: {e}")
+        await update.message.reply_text("❌ Error accessing shared video.")
+
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles button presses from the inline keyboard."""
+    query = update.callback_query
+    await query.answer()
+    
+    logger.info(f"Button pressed: {query.data} by user {query.from_user.id}")
+
+    if query.data == 'get_video':
+        await handle_get_video(query, context)
+    
+    elif query.data == 'get_share_link':
+        await handle_get_share_link(query, context)
+
+    elif query.data == 'upload_video':
+        await query.edit_message_text(
+            text="🎥 **Upload Video**\n\n"
+                 "Please send me the video you want to upload.\n\n"
+                 "💡 **Tip:** Add a caption and tags (e.g., `#funny #cat`) to make it searchable!",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        context.user_data['upload_mode'] = True
+
+    elif query.data == 'trending_videos':
+        await handle_trending_videos(query, context)
+
+    elif query.data == 'search_menu':
+        await query.edit_message_text(
+            text="🔎 **Video Search**\n\n"
+                 "To search for a video, use the `/search <keyword>` command.\n\n"
+                 "Example: `/search funny cats`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
+    elif query.data == 'ott_menu':
+        if not ADMIN_ID or query.from_user.id != ADMIN_ID:
+            await query.edit_message_text(text="❌ Access denied. Admin only.")
+            return
+        
+        keyboard = [
+            [InlineKeyboardButton("🎬 Add Movie", callback_data='ott_add_movie')],
+            [InlineKeyboardButton("📺 Add Series", callback_data='ott_add_series')],
+            [InlineKeyboardButton("📋 View OTT Content", callback_data='ott_view_all')],
+            [InlineKeyboardButton("🔙 Back to Admin", callback_data='admin_panel')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            text="🎬 **OTT Content Management**\n\nChoose an option:",
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+    elif query.data in ['ott_add_movie', 'ott_add_series']:
+        await handle_add_ott_content(query, context)
+    
+    elif query.data == 'ott_view_all':
+        if not ADMIN_ID or query.from_user.id != ADMIN_ID:
+            await query.edit_message_text(text="❌ Access denied. Admin only.")
+            return
+        
+        await handle_view_ott_content(query, context)
+    
+    elif query.data == 'admin_panel':
+        if not ADMIN_ID or query.from_user.id != ADMIN_ID:
+            await query.edit_message_text(text="❌ Access denied. Admin only.")
+            return
+            
+        admin_keyboard = [
+            [
+                InlineKeyboardButton("📡 Broadcast", callback_data='broadcast_menu'),
+                InlineKeyboardButton("📊 Statistics", callback_data='admin_stats')
+            ],
+            [
+                InlineKeyboardButton("🔥 Manage Trending", callback_data='manage_trending'),
+                InlineKeyboardButton("🔗 Share Statistics", callback_data='share_stats')
+            ],
+            [
+                InlineKeyboardButton("🎬 OTT Content", callback_data='ott_menu'),
+                InlineKeyboardButton("🔙 Back to Main", callback_data='back_to_main')
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(admin_keyboard)
+        
+        await query.edit_message_text(
+            text="🛠 **Admin Panel**\n\nChoose an option:",
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+    elif query.data == 'manage_trending':
+        if not ADMIN_ID or query.from_user.id != ADMIN_ID:
+            await query.edit_message_text(text="❌ Access denied.")
+            return
+        
+        context.user_data['trending_mode'] = True
+        await query.edit_message_text(
+            text="🔥 **Add Trending Video**\n\n"
+                 "Send me a video to add to trending list.\n\n"
+                 "Use /cancel to cancel this operation."
+        )
+
+    elif query.data == 'share_stats':
+        if not ADMIN_ID or query.from_user.id != ADMIN_ID:
+            await query.edit_message_text(text="❌ Access denied.")
+            return
+        
+        try:
+            total_shares = await shared_videos_collection.count_documents({})
+            active_shares = await shared_videos_collection.count_documents({
+                'expires_at': {'$gt': datetime.datetime.now()}
+            })
+            expired_shares = total_shares - active_shares
+            
+            pipeline = [
+                {'$match': {'expires_at': {'$gt': datetime.datetime.now()}}},
+                {'$sort': {'access_count': -1}},
+                {'$limit': 5}
+            ]
+            
+            top_shares = []
+            async for doc in shared_videos_collection.aggregate(pipeline):
+                top_shares.append(f"• Token: `{doc['token'][:8]}`... - {doc['access_count']} accesses")
+            
+            stats_text = f"🔗 **Share Statistics**\n\n"
+            stats_text += f"📊 Total shares created: {total_shares}\n"
+            stats_text += f"✅ Active shares: {active_shares}\n"
+            stats_text += f"❌ Expired shares: {expired_shares}\n\n"
+            
+            if top_shares:
+                stats_text += "🔥 **Top Accessed Shares:**\n"
+                stats_text += "\n".join(top_shares[:3])
+            
+            back_keyboard = [[InlineKeyboardButton("🔙 Back to Admin", callback_data='admin_panel')]]
+            reply_markup = InlineKeyboardMarkup(back_keyboard)
+            
+            await query.edit_message_text(
+                text=stats_text,
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as e:
+            logger.error(f"Error in share_stats: {e}")
+            await query.edit_message_text(text="❌ Error loading share statistics.")
+
+    elif query.data == 'broadcast_menu':
+        if not ADMIN_ID or query.from_user.id != ADMIN_ID:
+            await query.edit_message_text(text="❌ Access denied.")
+            return
+            
+        broadcast_keyboard = [
+            [InlineKeyboardButton("📝 Text Message", callback_data='broadcast_text')],
+            [InlineKeyboardButton("🎥 Video Broadcast", callback_data='broadcast_video')],
+            [InlineKeyboardButton("🔙 Back to Admin", callback_data='admin_panel')]
+        ]
+        reply_markup = InlineKeyboardMarkup(broadcast_keyboard)
+        
+        await query.edit_message_text(
+            text="📡 **Broadcast Menu**\n\n"
+                 "Choose the type of content to broadcast:",
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+    elif query.data in ['broadcast_text', 'broadcast_video']:
+        await handle_broadcast_setup(query, context)
+
+    elif query.data == 'admin_stats':
+        if not ADMIN_ID or query.from_user.id != ADMIN_ID:
+            await query.edit_message_text(text="❌ Access denied.")
+            return
+            
+        try:
+            total_users = await users_collection.count_documents({})
+            total_videos = await videos_collection.count_documents({})
+            trending_count = await videos_collection.count_documents({'is_trending': True})
+            total_shares = await shared_videos_collection.count_documents({})
+            active_shares = await shared_videos_collection.count_documents({
+                'expires_at': {'$gt': datetime.datetime.now()}
+            })
+            total_ott = await ott_collection.count_documents({})
+
+            today_iso = datetime.date.today().isoformat()
+            active_today = await users_collection.count_documents({
+                'last_reset': today_iso,
+                'daily_count': {'$gt': 0}
+            })
+            
+            stats_text = f"📊 **Bot Statistics**\n\n"
+            stats_text += f"👥 Total users: {total_users}\n"
+            stats_text += f"🔥 Active today: {active_today}\n"
+            stats_text += f"🎥 Total videos: {total_videos}\n"
+            stats_text += f"⭐ Trending videos: {trending_count}\n"
+            stats_text += f"🎬 OTT content: {total_ott}\n"
+            stats_text += f"🔗 Total shares created: {total_shares}\n"
+            stats_text += f"✅ Active shares: {active_shares}\n"
+            stats_text += f"⚙️ Daily limit: {DAILY_LIMIT}\n"
+            stats_text += f"🤖 Auto-delete: 5 minutes"
+            
+            back_keyboard = [[InlineKeyboardButton("🔙 Back to Admin", callback_data='admin_panel')]]
+            reply_markup = InlineKeyboardMarkup(back_keyboard)
+            
+            await query.edit_message_text(
+                text=stats_text,
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as e:
+            logger.error(f"Error in admin_stats: {e}")
+            await query.edit_message_text(text="❌ Error loading statistics.")
+
+    elif query.data == 'back_to_main':
+        user = query.from_user
+        welcome_message = f"Welcome back, {user.mention_markdown_v2()}\\!\n\n"
+        welcome_message += f"Your User ID: `{user.id}`\n\n"
+        welcome_message += "This bot shares random videos from our collection\\.\n"
+        welcome_message += "Use the buttons below to get videos or upload new ones\\."
+
+        keyboard = [
+            [
+                InlineKeyboardButton("🎥 Random Video", callback_data='get_video'),
+                InlineKeyboardButton("🔎 Search Videos", callback_data='search_menu')
+            ],
+            [
+                InlineKeyboardButton("📤 Upload Video", callback_data='upload_video'),
+                InlineKeyboardButton("🔥 Trending Videos", callback_data='trending_videos')
+            ],
+            [InlineKeyboardButton("🔗 Get Share Link", callback_data='get_share_link')]
+        ]
+        
+        if ADMIN_ID and user.id == ADMIN_ID:
+            keyboard.append([InlineKeyboardButton("📡 Admin Panel", callback_data='admin_panel')])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(welcome_message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
+
+async def handle_add_ott_content(query, context):
+    """Admin entry point to add a new movie or series."""
+    if not ADMIN_ID or query.from_user.id != ADMIN_ID:
+        await query.edit_message_text(text="❌ Access denied. Admin only.")
+        return
+
+    content_type = 'movie' if query.data == 'ott_add_movie' else 'series'
+    context.user_data[OTT_STATE] = 'awaiting_name'
+    context.user_data[OTT_TYPE] = content_type
+    context.user_data[OTT_DATA] = {}
+
+    await query.edit_message_text(
+        f"📝 **Add New {content_type.capitalize()}**\n\n"
+        f"Please send the **name** of the {content_type}."
     )
+
+async def handle_view_ott_content(query, context):
+    """View all OTT content for admin."""
+    try:
+        ott_content = await ott_collection.find().limit(10).to_list(length=None)
+        
+        if not ott_content:
+            await query.edit_message_text("📋 **No OTT content found**")
+            return
+        
+        content_list = []
+        for idx, content in enumerate(ott_content[:5], 1):
+            content_info = f"{idx}. **{content['name']}** ({content['year']})\n"
+            content_info += f"   Genre: {content['genre']}\n"
+            content_info += f"   Type: {content['content_type'].title()}\n"
+            content_info += f"   Views: {content.get('views', 0)}\n"
+            content_list.append(content_info)
+        
+        content_text = "📋 **OTT Content Library**\n\n"
+        content_text += "\n".join(content_list)
+        
+        if len(ott_content) > 5:
+            content_text += f"\n... and {len(ott_content) - 5} more items"
+        
+        back_keyboard = [[InlineKeyboardButton("🔙 Back to OTT Menu", callback_data='ott_menu')]]
+        reply_markup = InlineKeyboardMarkup(back_keyboard)
+        
+        await query.edit_message_text(
+            text=content_text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+    except Exception as e:
+        logger.error(f"Error viewing OTT content: {e}")
+        await query.edit_message_text("❌ Error loading OTT content.")
+
+async def handle_get_video(query, context):
+    """Handles getting a random video from the database."""
+    user = query.from_user
+    user_id = user.id
+    try:
+        user_doc = await users_collection.find_one({'user_id': user_id})
+        
+        today_iso = datetime.date.today().isoformat()
+        
+        if not user_doc or user_doc.get('last_reset') != today_iso:
+            await users_collection.update_one(
+                {'user_id': user_id},
+                {'$set': {'daily_count': 0, 'last_reset': today_iso, 'user_id': user_id}},
+                upsert=True
+            )
+            daily_count = 0
+        else:
+            daily_count = user_doc['daily_count']
+
+        if daily_count >= DAILY_LIMIT:
+            await query.edit_message_text(
+                f"🚫 **Daily Limit Reached**\n\n"
+                f"You have reached your daily limit of {DAILY_LIMIT} videos.\n"
+                f"Your limit will reset tomorrow\\. Enjoy your day\\! ✨",
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+            return
+
+        videos = await videos_collection.find().to_list(length=None)
+        if not videos:
+            await query.edit_message_text("😔 **No videos found!**\n\nCome back later.")
+            return
+
+        video_doc = random.choice(videos)
+        
+        await users_collection.update_one(
+            {'user_id': user_id},
+            {'$inc': {'daily_count': 1}}
+        )
+        
+        caption_text = f"🎥 **Video**\n\n"
+        if 'caption' in video_doc:
+            caption_text += f"{video_doc['caption']}\n\n"
+        caption_text += f"**Views:** {video_doc.get('views', 0) + 1}\n"
+        
+        keyboard = [
+            [InlineKeyboardButton("🔄 Get another video", callback_data='get_video')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        sent_message = await context.bot.send_video(
+            chat_id=query.message.chat_id,
+            video=video_doc['file_id'],
+            caption=caption_text,
+            protect_content=True,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+        await videos_collection.update_one(
+            {'_id': video_doc['_id']},
+            {'$inc': {'views': 1}}
+        )
+
+        context.job_queue.run_once(
+            delete_message,
+            300,
+            data={'chat_id': query.message.chat_id, 'message_id': sent_message.message_id}
+        )
+        await query.message.delete()
+        
+    except Exception as e:
+        logger.error(f"Error handling get_video: {e}")
+        await query.edit_message_text("❌ An error occurred while fetching the video.")
+
+async def handle_get_share_link(query, context):
+    """Handles creating a share link for a random video."""
+    try:
+        videos = await videos_collection.find().to_list(length=None)
+        if not videos:
+            await query.edit_message_text("😔 No videos found to share.")
+            return
+            
+        video_doc = random.choice(videos)
+        
+        share_url = await create_share_url(video_doc, query.from_user.id)
+        if share_url:
+            await query.edit_message_text(
+                f"🔗 **Share Link Created!**\n\n"
+                f"Share this link with your friends to give them access to this video:\n\n"
+                f"`{share_url}`\n\n"
+                f"This link is valid for **7 days**.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await query.edit_message_text("❌ An error occurred while creating the share link.")
+    except Exception as e:
+        logger.error(f"Error handling share link request: {e}")
+        await query.edit_message_text("❌ An error occurred while creating the share link.")
+
+async def handle_trending_videos(query, context):
+    """Handles getting trending videos from the database."""
+    try:
+        trending_videos = await videos_collection.find(
+            {'is_trending': True}
+        ).to_list(length=None)
+
+        if not trending_videos:
+            await query.edit_message_text("🔥 **No trending videos found!**\n\nCheck back later.")
+            return
+
+        for video_doc in trending_videos:
+            caption_text = f"🔥 **Trending Video**\n\n"
+            if 'caption' in video_doc:
+                caption_text += f"{video_doc['caption']}\n\n"
+            caption_text += f"**Views:** {video_doc.get('views', 0)}\n"
+            
+            sent_message = await context.bot.send_video(
+                chat_id=query.message.chat_id,
+                video=video_doc['file_id'],
+                caption=caption_text,
+                protect_content=True,
+                parse_mode=ParseMode.MARKDOWN
+            )
+
+            context.job_queue.run_once(
+                delete_message,
+                300,
+                data={'chat_id': query.message.chat_id, 'message_id': sent_message.message_id}
+            )
+
+        await query.message.reply_text("✅ Enjoy the trending videos!")
+        await query.message.delete()
+
+    except Exception as e:
+        logger.error(f"Error handling trending videos: {e}")
+        await query.message.reply_text("❌ An error occurred while fetching trending videos.")
+
+async def upload_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles incoming video uploads."""
+    user = update.effective_user
+    logger.info(f"Video upload from user {user.id}")
+    
+    if user.id != ADMIN_ID and not context.user_data.get('upload_mode'):
+        await update.message.reply_text(
+            "❌ This bot only accepts videos from the admin or in upload mode. "
+            "Use the '📤 Upload Video' button to start uploading."
+        )
+        return
+        
+    try:
+        video_file_id = update.message.video.file_id
+        caption = update.message.caption if update.message.caption else ""
+        
+        tags = re.findall(r'#(\w+)', caption)
+        
+        video_doc = {
+            'file_id': video_file_id,
+            'caption': caption,
+            'uploader_id': user.id,
+            'upload_date': datetime.datetime.now(),
+            'tags': tags,
+            'views': 0,
+            'is_trending': False
+        }
+
+        await videos_collection.insert_one(video_doc)
+        
+        await update.message.reply_
