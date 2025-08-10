@@ -61,6 +61,12 @@
         .web-player-button:hover, .web-player-button:focus {
             background-color: #007bff;
         }
+        .thumbnail-img {
+            width: 100%;
+            height: 160px;
+            object-fit: cover;
+            border-radius: 0.5rem;
+        }
     </style>
 </head>
 <body class="p-6">
@@ -107,21 +113,33 @@
             const moviesSection = document.getElementById('movies-section');
             const seriesSection = document.getElementById('series-section');
 
-            // IMPORTANT: Replace this placeholder with your bot's actual public webhook URL
-            const BOT_API_URL = 'https://your-bot-name.koyeb.app';
+            // Auto-detect the current domain or use environment variable
+            const BOT_API_URL = window.location.origin;
             const CONTENT_ENDPOINT = `${BOT_API_URL}/ott_content`;
+
+            console.log('Fetching content from:', CONTENT_ENDPOINT);
 
             async function fetchOttContent() {
                 try {
-                    const response = await fetch(CONTENT_ENDPOINT);
+                    const response = await fetch(CONTENT_ENDPOINT, {
+                        method: 'GET',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        }
+                    });
+                    
+                    console.log('Response status:', response.status);
+                    
                     if (!response.ok) {
                         throw new Error(`HTTP error! status: ${response.status}`);
                     }
                     const data = await response.json();
+                    console.log('Received data:', data);
                     renderContent(data);
                 } catch (error) {
                     console.error('Error fetching OTT content:', error);
                     loadingMessage.classList.add('hidden');
+                    errorMessage.textContent = `Error: ${error.message}. Make sure the bot is running and has OTT content.`;
                     errorMessage.classList.remove('hidden');
                 }
             }
@@ -134,6 +152,12 @@
 
                 let hasMovies = false;
                 let hasSeries = false;
+
+                if (!Array.isArray(ottContent) || ottContent.length === 0) {
+                    errorMessage.textContent = "No content available. Please add some content via the bot's admin panel.";
+                    errorMessage.classList.remove('hidden');
+                    return;
+                }
 
                 ottContent.forEach(item => {
                     if (item.type === 'movie') {
@@ -149,7 +173,7 @@
                 if (hasSeries) seriesSection.classList.remove('hidden');
                 
                 if (!hasMovies && !hasSeries) {
-                    errorMessage.textContent = "No content available. Please add some via the bot.";
+                    errorMessage.textContent = "No movies or series found. Please add content via the bot.";
                     errorMessage.classList.remove('hidden');
                 }
                 
@@ -158,11 +182,19 @@
 
             function createMovieCard(movie) {
                 const card = document.createElement('div');
-                card.className = 'card w-full bg-gray-800 rounded-xl shadow-xl h-64 flex flex-col items-center justify-center cursor-pointer transition-transform duration-200';
-                card.setAttribute('tabindex', '0'); // Make card focusable for TV remote
+                card.className = 'card w-full bg-gray-800 rounded-xl shadow-xl overflow-hidden cursor-pointer transition-transform duration-200';
+                card.setAttribute('tabindex', '0');
+                
+                const thumbnailUrl = movie.thumbnail || 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjMwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KICA8cmVjdCB3aWR0aD0iMjAwIiBoZWlnaHQ9IjMwMCIgZmlsbD0iIzMzMzMzMyIvPgogIDx0ZXh0IHg9IjEwMCIgeT0iMTUwIiBmb250LWZhbWlseT0iQXJpYWwsIHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTQiIGZpbGw9IiNmZmYiIHRleHQtYW5jaG9yPSJtaWRkbGUiPk5vIEltYWdlPC90ZXh0Pgo8L3N2Zz4K';
+                
                 card.innerHTML = `
-                    <img src="${movie.thumbnail}" alt="${movie.name}" class="h-40 w-auto rounded-lg mt-4 mb-2 object-cover">
-                    <h3 class="text-sm font-bold text-center">${movie.name}</h3>
+                    <img src="${thumbnailUrl}" alt="${movie.name}" class="thumbnail-img" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjMwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KICA8cmVjdCB3aWR0aD0iMjAwIiBoZWlnaHQ9IjMwMCIgZmlsbD0iIzMzMzMzMyIvPgogIDx0ZXh0IHg9IjEwMCIgeT0iMTUwIiBmb250LWZhbWlseT0iQXJpYWwsIHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTQiIGZpbGw9IiNmZmYiIHRleHQtYW5jaG9yPSJtaWRkbGUiPk5vIEltYWdlPC90ZXh0Pgo8L3N2Zz4K'">
+                    <div class="p-4">
+                        <h3 class="text-sm font-bold text-center truncate">${movie.name}</h3>
+                        <div class="flex justify-center mt-2">
+                            <span class="bg-blue-600 text-xs px-2 py-1 rounded">Movie</span>
+                        </div>
+                    </div>
                 `;
                 card.onclick = () => showPlayOptions(movie.name, movie.streaming_url);
                 return card;
@@ -170,11 +202,23 @@
 
             function createSeriesCard(series) {
                 const card = document.createElement('div');
-                card.className = 'card w-full bg-gray-800 rounded-xl shadow-xl h-64 flex flex-col items-center justify-center cursor-pointer transition-transform duration-200';
+                card.className = 'card w-full bg-gray-800 rounded-xl shadow-xl overflow-hidden cursor-pointer transition-transform duration-200';
                 card.setAttribute('tabindex', '0');
+                
+                const thumbnailUrl = series.thumbnail || 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjMwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KICA8cmVjdCB3aWR0aD0iMjAwIiBoZWlnaHQ9IjMwMCIgZmlsbD0iIzMzMzMzMyIvPgogIDx0ZXh0IHg9IjEwMCIgeT0iMTUwIiBmb250LWZhbWlseT0iQXJpYWwsIHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTQiIGZpbGw9IiNmZmYiIHRleHQtYW5jaG9yPSJtaWRkbGUiPk5vIEltYWdlPC90ZXh0Pgo8L3N2Zz4K';
+                
+                const totalEpisodes = series.seasons?.reduce((total, season) => total + (season.episodes?.length || 0), 0) || 0;
+                
                 card.innerHTML = `
-                    <img src="${series.thumbnail}" alt="${series.name}" class="h-40 w-auto rounded-lg mt-4 mb-2 object-cover">
-                    <h3 class="text-sm font-bold text-center">${series.name}</h3>
+                    <img src="${thumbnailUrl}" alt="${series.name}" class="thumbnail-img" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjMwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KICA8cmVjdCB3aWR0aD0iMjAwIiBoZWlnaHQ9IjMwMCIgZmlsbD0iIzMzMzMzMyIvPgogIDx0ZXh0IHg9IjEwMCIgeT0iMTUwIiBmb250LWZhbWlseT0iQXJpYWwsIHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTQiIGZpbGw9IiNmZmYiIHRleHQtYW5jaG9yPSJtaWRkbGUiPk5vIEltYWdlPC90ZXh0Pgo8L3N2Zz4K'">
+                    <div class="p-4">
+                        <h3 class="text-sm font-bold text-center truncate">${series.name}</h3>
+                        <div class="flex justify-center mt-2 space-x-1">
+                            <span class="bg-purple-600 text-xs px-2 py-1 rounded">Series</span>
+                            <span class="bg-gray-600 text-xs px-2 py-1 rounded">${series.seasons?.length || 0} Seasons</span>
+                            <span class="bg-gray-600 text-xs px-2 py-1 rounded">${totalEpisodes} Episodes</span>
+                        </div>
+                    </div>
                 `;
                 card.onclick = () => showSeasonEpisodeSelector(series);
                 return card;
@@ -192,14 +236,14 @@
                         <h3 class="text-xl font-bold mb-4">Play "${title}"</h3>
                         <div class="flex space-x-4">
                             <button id="webPlayerBtn" class="web-player-button bg-blue-600 text-white px-6 py-3 rounded-lg font-bold transition-colors duration-200">
-                                Web Player
+                                🌐 Web Player
                             </button>
                             <a href="intent:${url}#Intent;package=com.mxtech.videoplayer.ad;S.title=${encodeURIComponent(title)};end" 
-                                class="mx-player-button bg-yellow-500 text-black px-6 py-3 rounded-lg font-bold transition-colors duration-200 flex items-center justify-center">
-                                MX Player
+                                class="mx-player-button bg-yellow-500 text-black px-6 py-3 rounded-lg font-bold transition-colors duration-200 flex items-center justify-center no-underline">
+                                📱 MX Player
                             </a>
                         </div>
-                        <button id="closeOptionsBtn" class="mt-6 text-red-400">Cancel</button>
+                        <button id="closeOptionsBtn" class="mt-6 text-red-400 hover:text-red-300">❌ Cancel</button>
                     </div>
                 `;
                 document.body.appendChild(playerOptions);
@@ -209,38 +253,59 @@
                     playerOptions.remove();
                 };
                 document.getElementById('closeOptionsBtn').onclick = () => playerOptions.remove();
+                
+                // Close on background click
+                playerOptions.onclick = (e) => {
+                    if (e.target === playerOptions) playerOptions.remove();
+                };
             }
 
             function playInWebPlayer(url) {
                 videoPlayer.src = url;
                 playerContainer.style.display = 'flex';
-                videoPlayer.play();
+                videoPlayer.play().catch(e => {
+                    console.error('Error playing video:', e);
+                    alert('Error playing video. The URL might be invalid or the video format is not supported.');
+                });
             }
 
             function showSeasonEpisodeSelector(series) {
+                if (!series.seasons || series.seasons.length === 0) {
+                    alert('No seasons available for this series.');
+                    return;
+                }
+                
                 const selector = document.createElement('div');
                 selector.className = 'fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4';
                 selector.innerHTML = `
-                    <div class="bg-gray-800 p-8 rounded-xl shadow-2xl text-center w-full max-w-lg max-h-[90vh] overflow-y-auto">
-                        <h3 class="text-xl font-bold mb-6">${series.name}</h3>
-                        ${series.seasons.map(season => `
-                            <div class="mb-4">
-                                <h4 class="text-lg font-semibold text-left mb-2">${season.season_name}</h4>
-                                <div class="grid grid-cols-2 gap-2">
-                                    ${season.episodes.map(episode => `
-                                        <button class="bg-gray-700 text-white px-4 py-2 rounded-lg text-left truncate hover:bg-blue-600 transition-colors duration-200"
-                                                onclick="showPlayOptions('${episode.episode_name}', '${episode.streaming_url}')">
-                                            ${episode.episode_name}
-                                        </button>
-                                    `).join('')}
-                                </div>
+                    <div class="bg-gray-800 p-8 rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto">
+                        <h3 class="text-xl font-bold mb-6 text-center">${series.name}</h3>
+                        ${series.seasons.map((season, seasonIndex) => `
+                            <div class="mb-6">
+                                <h4 class="text-lg font-semibold mb-3 text-purple-400">${season.season_name}</h4>
+                                ${season.episodes && season.episodes.length > 0 ? `
+                                    <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                                        ${season.episodes.map((episode, episodeIndex) => `
+                                            <button class="bg-gray-700 text-white px-4 py-3 rounded-lg text-left hover:bg-blue-600 transition-colors duration-200 episode-btn"
+                                                    onclick="showPlayOptions('${episode.episode_name}', '${episode.streaming_url}')">
+                                                <div class="font-medium truncate">${episode.episode_name}</div>
+                                                <div class="text-xs text-gray-300 mt-1">Episode ${episodeIndex + 1}</div>
+                                            </button>
+                                        `).join('')}
+                                    </div>
+                                ` : '<p class="text-gray-400">No episodes available</p>'}
                             </div>
                         `).join('')}
-                        <button id="closeSelectorBtn" class="mt-6 text-red-400">Close</button>
+                        <button id="closeSelectorBtn" class="mt-6 w-full bg-red-600 text-white py-2 rounded-lg hover:bg-red-700">❌ Close</button>
                     </div>
                 `;
                 document.body.appendChild(selector);
                 document.getElementById('closeSelectorBtn').onclick = () => selector.remove();
+                
+                // Close on background click
+                selector.onclick = (e) => {
+                    if (e.target === selector) selector.remove();
+                };
             }
 
             closePlayerBtn.onclick = () => {
@@ -255,8 +320,13 @@
 
             const updateFocusableElements = () => {
                 focusableElements.length = 0;
-                document.querySelectorAll('a[href], button, [tabindex="0"]').forEach(el => focusableElements.push(el));
+                document.querySelectorAll('a[href], button, [tabindex="0"]').forEach(el => {
+                    if (el.offsetParent !== null) { // Only visible elements
+                        focusableElements.push(el);
+                    }
+                });
                 if (focusableElements.length > 0) {
+                    currentFocus = 0;
                     focusableElements[0].focus();
                 }
             };
@@ -270,18 +340,75 @@
                     return;
                 }
 
-                if (e.key === 'ArrowRight') {
-                    currentFocus = (currentFocus + 1) % focusableElements.length;
-                } else if (e.key === 'ArrowLeft') {
-                    currentFocus = (currentFocus - 1 + focusableElements.length) % focusableElements.length;
-                } else if (e.key === 'Enter') {
-                    focusableElements[currentFocus].click();
+                switch(e.key) {
+                    case 'ArrowRight':
+                        e.preventDefault();
+                        currentFocus = (currentFocus + 1) % focusableElements.length;
+                        break;
+                    case 'ArrowLeft':
+                        e.preventDefault();
+                        currentFocus = (currentFocus - 1 + focusableElements.length) % focusableElements.length;
+                        break;
+                    case 'ArrowDown':
+                        e.preventDefault();
+                        currentFocus = Math.min(currentFocus + 6, focusableElements.length - 1);
+                        break;
+                    case 'ArrowUp':
+                        e.preventDefault();
+                        currentFocus = Math.max(currentFocus - 6, 0);
+                        break;
+                    case 'Enter':
+                        e.preventDefault();
+                        focusableElements[currentFocus]?.click();
+                        return;
+                    case 'Escape':
+                    case 'Backspace':
+                        // Close any open modals
+                        document.querySelectorAll('.fixed.inset-0').forEach(modal => modal.remove());
+                        return;
                 }
                 
-                if (focusableElements.length > 0) {
+                if (focusableElements.length > 0 && focusableElements[currentFocus]) {
                     focusableElements[currentFocus].focus();
                 }
             });
+
+            // Touch/swipe support for mobile
+            let touchStartX = 0;
+            let touchStartY = 0;
+
+            document.addEventListener('touchstart', (e) => {
+                touchStartX = e.touches[0].clientX;
+                touchStartY = e.touches[0].clientY;
+            });
+
+            document.addEventListener('touchend', (e) => {
+                const touchEndX = e.changedTouches[0].clientX;
+                const touchEndY = e.changedTouches[0].clientY;
+                const diffX = touchStartX - touchEndX;
+                const diffY = touchStartY - touchEndY;
+
+                // Minimum swipe distance
+                if (Math.abs(diffX) > 50 || Math.abs(diffY) > 50) {
+                    if (Math.abs(diffX) > Math.abs(diffY)) {
+                        // Horizontal swipe
+                        if (diffX > 0) {
+                            // Swiped left - next item
+                            currentFocus = (currentFocus + 1) % focusableElements.length;
+                        } else {
+                            // Swiped right - previous item
+                            currentFocus = (currentFocus - 1 + focusableElements.length) % focusableElements.length;
+                        }
+                    }
+                    
+                    if (focusableElements.length > 0 && focusableElements[currentFocus]) {
+                        focusableElements[currentFocus].focus();
+                    }
+                }
+            });
+
+            // Auto-refresh content every 30 seconds
+            setInterval(fetchOttContent, 30000);
 
             // Fetch and render content on page load
             fetchOttContent();
@@ -289,4 +416,3 @@
     </script>
 </body>
 </html>
-
