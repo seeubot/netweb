@@ -14,14 +14,14 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from telegram.error import TelegramError
+from telegram.warnings import PTBUserWarning
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
-from telegram.warnings import PTBUserWarning
+from contextlib import asynccontextmanager
 import warnings
 
 # Suppress PTBUserWarning for webhook updates
 warnings.filterwarnings("ignore", category=PTBUserWarning)
-
 
 # Load environment variables from .env file
 load_dotenv()
@@ -53,15 +53,15 @@ db = None
 users_collection = None
 videos_collection = None
 shared_videos_collection = None
-ott_collection = None # New collection for OTT content
+ott_collection = None
 
 # State keys for admin content management
 OTT_STATE = 'ott_state'
 OTT_TYPE = 'ott_type'
 OTT_DATA = 'ott_data'
 
-# FastAPI app instance
-app = FastAPI()
+# Global application instance
+application = None
 
 async def connect_to_mongodb():
     """Connects to MongoDB and sets up global collections."""
@@ -73,7 +73,7 @@ async def connect_to_mongodb():
         users_collection = db['users']
         videos_collection = db['videos']
         shared_videos_collection = db['shared_videos']
-        ott_collection = db['ott_content'] # Initialize new collection
+        ott_collection = db['ott_content']
         logger.info("Successfully connected to MongoDB.")
         return True
     except Exception as e:
@@ -233,7 +233,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                  "Example: `/search funny cats`"
         )
     
-    # New Admin OTT panel entry point
     elif query.data == 'ott_menu':
         if not ADMIN_ID or query.from_user.id != ADMIN_ID:
             await query.edit_message_text(text="❌ Access denied. Admin only.")
@@ -252,11 +251,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             parse_mode=ParseMode.MARKDOWN
         )
 
-    # New Admin OTT content type selection
     elif query.data in ['ott_add_movie', 'ott_add_series']:
         await handle_add_ott_content(query, context)
     
-    # Existing admin panel logic
     elif query.data == 'admin_panel':
         if not ADMIN_ID or query.from_user.id != ADMIN_ID:
             await query.edit_message_text(text="❌ Access denied. Admin only.")
@@ -284,7 +281,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             parse_mode=ParseMode.MARKDOWN
         )
 
-    # Rest of the existing callback handlers...
     elif query.data == 'manage_trending':
         if not ADMIN_ID or query.from_user.id != ADMIN_ID:
             await query.edit_message_text(text="❌ Access denied.")
@@ -447,34 +443,273 @@ async def handle_add_ott_content(query, context):
     )
 
 async def handle_get_video(query, context):
-    # Existing handler for getting a random video
-    # ... (no changes needed)
-    pass
+    """Handles getting a random video from the database."""
+    user = query.from_user
+    user_id = user.id
+    try:
+        user_doc = await users_collection.find_one({'user_id': user_id})
+        
+        today_iso = datetime.date.today().isoformat()
+        
+        if not user_doc or user_doc.get('last_reset') != today_iso:
+            await users_collection.update_one(
+                {'user_id': user_id},
+                {'$set': {'daily_count': 0, 'last_reset': today_iso, 'user_id': user_id}},
+                upsert=True
+            )
+            daily_count = 0
+        else:
+            daily_count = user_doc['daily_count']
+
+        if daily_count >= DAILY_LIMIT:
+            await query.edit_message_text(
+                f"🚫 **Daily Limit Reached**\n\n"
+                f"You have reached your daily limit of {DAILY_LIMIT} videos.\n"
+                f"Your limit will reset tomorrow\\. Enjoy your day\\! ✨",
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+            return
+
+        videos = await videos_collection.find().to_list(length=None)
+        if not videos:
+            await query.edit_message_text("😔 **No videos found!**\n\nCome back later.")
+            return
+
+        video_doc = random.choice(videos)
+        
+        await users_collection.update_one(
+            {'user_id': user_id},
+            {'$inc': {'daily_count': 1}}
+        )
+        
+        caption_text = f"🎥 **Video**\n\n"
+        if 'caption' in video_doc:
+            caption_text += f"{video_doc['caption']}\n\n"
+        caption_text += f"**Views:** {video_doc.get('views', 0) + 1}\n"
+        
+        keyboard = [
+            [InlineKeyboardButton("🔄 Get another video", callback_data='get_video')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        sent_message = await context.bot.send_video(
+            chat_id=query.message.chat_id,
+            video=video_doc['file_id'],
+            caption=caption_text,
+            protect_content=True,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+        await videos_collection.update_one(
+            {'_id': video_doc['_id']},
+            {'$inc': {'views': 1}}
+        )
+
+        context.job_queue.run_once(
+            delete_message,
+            300,
+            data={'chat_id': query.message.chat_id, 'message_id': sent_message.message_id}
+        )
+        await query.message.delete()
+        
+    except Exception as e:
+        logger.error(f"Error handling get_video: {e}")
+        await query.message.reply_text("❌ An error occurred while fetching the video.")
 
 async def handle_get_share_link(query, context):
-    # Existing handler for getting a share link
-    # ... (no changes needed)
-    pass
+    """Handles creating a share link for a random video."""
+    try:
+        videos = await videos_collection.find().to_list(length=None)
+        if not videos:
+            await query.edit_message_text("😔 No videos found to share.")
+            return
+            
+        video_doc = random.choice(videos)
+        
+        share_url = await create_share_url(video_doc, query.from_user.id)
+        if share_url:
+            await query.edit_message_text(
+                f"🔗 **Share Link Created!**\n\n"
+                f"Share this link with your friends to give them access to this video:\n\n"
+                f"`{share_url}`\n\n"
+                f"This link is valid for **7 days**.",
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+        else:
+            await query.edit_message_text("❌ An error occurred while creating the share link.")
+    except Exception as e:
+        logger.error(f"Error handling share link request: {e}")
+        await query.edit_message_text("❌ An error occurred while creating the share link.")
 
 async def handle_trending_videos(query, context):
-    # Existing handler for trending videos
-    # ... (no changes needed)
-    pass
+    """Handles getting trending videos from the database."""
+    try:
+        trending_videos = await videos_collection.find(
+            {'is_trending': True}
+        ).to_list(length=None)
+
+        if not trending_videos:
+            await query.edit_message_text("🔥 **No trending videos found!**\n\nCheck back later.")
+            return
+
+        for video_doc in trending_videos:
+            caption_text = f"🔥 **Trending Video**\n\n"
+            if 'caption' in video_doc:
+                caption_text += f"{video_doc['caption']}\n\n"
+            caption_text += f"**Views:** {video_doc.get('views', 0)}\n"
+            
+            sent_message = await context.bot.send_video(
+                chat_id=query.message.chat_id,
+                video=video_doc['file_id'],
+                caption=caption_text,
+                protect_content=True,
+                parse_mode=ParseMode.MARKDOWN
+            )
+
+            context.job_queue.run_once(
+                delete_message,
+                300,
+                data={'chat_id': query.message.chat_id, 'message_id': sent_message.message_id}
+            )
+
+        await query.message.reply_text("✅ Enjoy the trending videos!")
+        await query.message.delete()
+
+    except Exception as e:
+        logger.error(f"Error handling trending videos: {e}")
+        await query.message.reply_text("❌ An error occurred while fetching trending videos.")
 
 async def upload_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Existing handler for video uploads
-    # ... (no changes needed)
-    pass
+    """Handles incoming video uploads."""
+    user = update.effective_user
+    if user.id != ADMIN_ID and not context.user_data.get('upload_mode'):
+        await update.message.reply_text(
+            "❌ This bot only accepts videos from the admin or in upload mode. "
+            "Use the '📤 Upload Video' button to start uploading."
+        )
+        return
+        
+    try:
+        video_file_id = update.message.video.file_id
+        caption = update.message.caption if update.message.caption else ""
+        
+        tags = re.findall(r'#(\w+)', caption)
+        
+        video_doc = {
+            'file_id': video_file_id,
+            'caption': caption,
+            'uploader_id': user.id,
+            'upload_date': datetime.datetime.now(),
+            'tags': tags,
+            'views': 0,
+            'is_trending': False
+        }
+
+        await videos_collection.insert_one(video_doc)
+        
+        await update.message.reply_text("✅ Video uploaded successfully!")
+        
+        if context.user_data.get('upload_mode'):
+            del context.user_data['upload_mode']
+    except Exception as e:
+        logger.error(f"Error saving video to DB: {e}")
+        await update.message.reply_text("❌ An error occurred while uploading the video.")
 
 async def handle_broadcast_setup(query, context):
-    # Existing handler for broadcast setup
-    # ... (no changes needed)
-    pass
+    """Admin entry point for setting up a broadcast."""
+    if not ADMIN_ID or query.from_user.id != ADMIN_ID:
+        await query.edit_message_text(text="❌ Access denied.")
+        return
+
+    broadcast_type = query.data.split('_')[1]
+    context.user_data['broadcast_mode'] = broadcast_type
+    
+    if broadcast_type == 'text':
+        await query.edit_message_text(
+            text="📝 **Broadcast Text Message**\n\n"
+                 "Please send the text message you want to broadcast to all users."
+        )
+    elif broadcast_type == 'video':
+        await query.edit_message_text(
+            text="🎥 **Broadcast Video**\n\n"
+                 "Please send the video you want to broadcast to all users."
+        )
 
 async def handle_admin_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Existing handler for admin content
-    # ... (no changes needed)
-    pass
+    """Handles admin-specific content, like broadcast messages and trending videos."""
+    user_id = update.message.from_user.id
+    if user_id != ADMIN_ID:
+        return
+
+    if context.user_data.get('broadcast_mode') == 'text' and update.message.text:
+        message_text = update.message.text
+        await broadcast_message(context, message_text)
+        del context.user_data['broadcast_mode']
+    
+    elif context.user_data.get('broadcast_mode') == 'video' and update.message.video:
+        video_file_id = update.message.video.file_id
+        await broadcast_video(context, video_file_id)
+        del context.user_data['broadcast_mode']
+
+    elif context.user_data.get('trending_mode') and update.message.video:
+        video_file_id = update.message.video.file_id
+        caption = update.message.caption if update.message.caption else "Trending Video"
+        
+        try:
+            video_doc = await videos_collection.find_one({'file_id': video_file_id})
+            if video_doc:
+                await videos_collection.update_one(
+                    {'_id': video_doc['_id']},
+                    {'$set': {'is_trending': True}}
+                )
+                await update.message.reply_text("✅ Video marked as trending successfully!")
+            else:
+                await update.message.reply_text("❌ Video not found in database. Please upload it first.")
+        except Exception as e:
+            logger.error(f"Error marking video as trending: {e}")
+            await update.message.reply_text("❌ An error occurred.")
+        
+        del context.user_data['trending_mode']
+
+async def broadcast_message(context: ContextTypes.DEFAULT_TYPE, message: str) -> None:
+    """Broadcasts a text message to all users."""
+    users = await users_collection.find().to_list(length=None)
+    for user in users:
+        try:
+            await context.bot.send_message(
+                chat_id=user['user_id'],
+                text=f"📢 **Broadcast Message**\n\n{message}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            await asyncio.sleep(0.1) # Add a small delay to avoid rate limiting
+        except TelegramError as e:
+            logger.error(f"Failed to send broadcast to user {user['user_id']}: {e}")
+    
+    await context.bot.send_message(
+        chat_id=ADMIN_ID,
+        text=f"✅ Broadcast to {len(users)} users complete."
+    )
+
+async def broadcast_video(context: ContextTypes.DEFAULT_TYPE, video_id: str) -> None:
+    """Broadcasts a video to all users."""
+    users = await users_collection.find().to_list(length=None)
+    for user in users:
+        try:
+            await context.bot.send_video(
+                chat_id=user['user_id'],
+                video=video_id,
+                caption="📢 **Broadcast Video**",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            await asyncio.sleep(0.1) # Add a small delay
+        except TelegramError as e:
+            logger.error(f"Failed to send broadcast to user {user['user_id']}: {e}")
+    
+    await context.bot.send_message(
+        chat_id=ADMIN_ID,
+        text=f"✅ Video broadcast to {len(users)} users complete."
+    )
 
 async def cancel_operation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Cancels any ongoing admin operation (broadcast, trending add, OTT)."""
@@ -507,25 +742,34 @@ async def delete_message(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error(f"Error deleting message: {e}")
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Existing handler for stats
-    # ... (no changes needed)
-    pass
+    """Displays bot usage statistics."""
+    try:
+        total_users = await users_collection.count_documents({})
+        total_videos = await videos_collection.count_documents({})
+        trending_count = await videos_collection.count_documents({'is_trending': True})
+        
+        stats_text = f"📊 **Bot Statistics**\n\n"
+        stats_text += f"👥 Total users: {total_users}\n"
+        stats_text += f"🎥 Total videos: {total_videos}\n"
+        stats_text += f"🔥 Trending videos: {trending_count}\n"
+        
+        await update.message.reply_text(stats_text, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logger.error(f"Error fetching stats: {e}")
+        await update.message.reply_text("❌ An error occurred while fetching statistics.")
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles incoming text messages, including for the new OTT content flow."""
     user_id = update.message.from_user.id
     
-    # Handle OTT content creation flow for admin
     if ADMIN_ID and user_id == ADMIN_ID and context.user_data.get(OTT_STATE):
         await handle_ott_input(update, context)
         return
 
-    # Handle admin broadcast
     if ADMIN_ID and user_id == ADMIN_ID and context.user_data.get('broadcast_mode') == 'text':
         await handle_admin_content(update, context)
         return
     
-    # Fallback message
     await update.message.reply_text("💬 I'm not configured to respond to general text messages yet. Please use the buttons or send videos!")
 
 async def handle_ott_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -563,7 +807,6 @@ async def handle_ott_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     elif state == 'awaiting_url':
         ott_data['streaming_url'] = message.text
         
-        # Save movie to database
         ott_data['type'] = 'movie'
         await ott_collection.insert_one(ott_data)
         
@@ -575,7 +818,6 @@ async def handle_ott_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         context.user_data.pop(OTT_TYPE)
         context.user_data.pop(OTT_DATA)
 
-    # Series-specific states
     elif state == 'awaiting_season_name':
         season = {'season_name': message.text, 'episodes': []}
         ott_data['seasons'].append(season)
@@ -613,7 +855,6 @@ async def handle_ott_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             reply_markup=reply_markup
         )
     
-    # Callback handlers for the series flow
     elif state == 'awaiting_action':
         query = update.callback_query
         if not query:
@@ -628,7 +869,6 @@ async def handle_ott_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.edit_message_text("📺 Please send the **name of the next season**.")
         
         elif query.data == 'ott_done':
-            # Finalize and save the series to the database
             ott_data['type'] = 'series'
             await ott_collection.insert_one(ott_data)
             
@@ -651,14 +891,17 @@ async def cleanup_expired_shares(context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         logger.error(f"Error cleaning up expired shares: {e}")
 
-# --- NEW FastAPI ENDPOINTS ---
-
-@app.on_event("startup")
-async def startup_event():
-    """Application startup event to connect to MongoDB and set up the bot."""
-    await connect_to_mongodb()
-    
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Handles startup and shutdown events for the FastAPI application.
+    """
     global application
+    
+    # Startup tasks
+    logger.info("Application startup initiated.")
+    await connect_to_mongodb()
+
     application = (
         Application.builder()
         .token(API_TOKEN)
@@ -679,23 +922,22 @@ async def startup_event():
     await application.bot.set_webhook(url=f"{WEBHOOK_URL}")
     await application.initialize()
     await application.start()
+    
     logger.info("Bot started and webhook set.")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Application shutdown event to stop the bot and close MongoDB connection."""
-    global db_client
+    yield # Application is now running
+    
+    # Shutdown tasks
+    logger.info("Application shutdown initiated.")
     await application.stop()
     if db_client:
         db_client.close()
     logger.info("Bot stopped and MongoDB connection closed.")
 
+app = FastAPI(lifespan=lifespan)
+
 @app.post("/")
 async def telegram_webhook(request: Request):
     """Handles incoming Telegram webhook updates."""
-    # This is a bit of a hack to get PTB to play nicely with FastAPI.
-    # The webhook handler needs to be called with the bot application instance.
     update_json = await request.json()
     update = Update.de_json(update_json, application.bot)
     await application.process_update(update)
@@ -723,7 +965,6 @@ async def get_ott_content():
         logger.error(f"Error fetching OTT content: {e}")
         return {"error": "Failed to fetch content"}, 500
 
-
 def main() -> None:
     """Starts the application using uvicorn."""
     if not all([API_TOKEN, WEBHOOK_URL, BOT_USERNAME]):
@@ -740,5 +981,4 @@ if __name__ == '__main__':
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         raise
-
 
