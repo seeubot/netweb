@@ -2,4 +2,6 @@ python-telegram-bot[webhooks,job-queue]==22.3
 motor>=3.3
 python-dotenv>=1.0.1
 pymongo[srv]>=4.6.0
-uvicorn[standard]  # if you plan FastAPI integration; optional otherwise
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+
