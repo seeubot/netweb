@@ -13,7 +13,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-from telegram.error import TelegramError
+from telegram.error import TelegramError, RetryAfter
 from telegram.warnings import PTBUserWarning
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
@@ -79,6 +79,29 @@ async def connect_to_mongodb():
     except Exception as e:
         logger.error(f"Failed to connect to MongoDB: {e}")
         return False
+
+async def set_webhook_with_retry(bot, webhook_url, max_retries=3):
+    """Set webhook with retry logic for rate limiting."""
+    for attempt in range(max_retries):
+        try:
+            await bot.set_webhook(url=webhook_url)
+            logger.info(f"Webhook set successfully on attempt {attempt + 1}")
+            return True
+        except RetryAfter as e:
+            if attempt < max_retries - 1:
+                wait_time = e.retry_after + 1  # Add 1 second buffer
+                logger.warning(f"Rate limited. Waiting {wait_time} seconds before retry {attempt + 2}")
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error(f"Failed to set webhook after {max_retries} attempts due to rate limiting")
+                raise
+        except Exception as e:
+            logger.error(f"Error setting webhook on attempt {attempt + 1}: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2)
+            else:
+                raise
+    return False
 
 def generate_share_token(video_id: str, user_id: int) -> str:
     """Generate a unique share token for a video."""
@@ -919,11 +942,17 @@ async def lifespan(app: FastAPI):
         application.job_queue.run_repeating(cleanup_expired_shares, interval=3600, first=3600)
         application.job_queue.run_repeating(lambda context: logger.info("Bot is running..."), interval=3600, first=3600)
     
-    await application.bot.set_webhook(url=f"{WEBHOOK_URL}")
+    # Use the new retry function for setting webhook
+    try:
+        await set_webhook_with_retry(application.bot, WEBHOOK_URL)
+    except Exception as e:
+        logger.error(f"Failed to set webhook after retries: {e}")
+        # Continue without webhook - the bot might still work in polling mode
+    
     await application.initialize()
     await application.start()
     
-    logger.info("Bot started and webhook set.")
+    logger.info("Bot started successfully.")
     yield # Application is now running
     
     # Shutdown tasks
@@ -981,4 +1010,3 @@ if __name__ == '__main__':
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         raise
-
