@@ -17,6 +17,8 @@ from telegram.error import TelegramError, RetryAfter
 from telegram.warnings import PTBUserWarning
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 import warnings
 
@@ -964,6 +966,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# Add CORS middleware to allow frontend access
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, replace with specific domains
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 @app.post("/")
 async def telegram_webhook(request: Request):
     """Handles incoming Telegram webhook updates."""
@@ -979,7 +990,10 @@ async def get_ott_content():
     This will be called by the frontend web page.
     """
     if not ott_collection:
-        return {"error": "Database not initialized"}, 503
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Database not initialized"}
+        )
 
     try:
         cursor = ott_collection.find({})
@@ -988,11 +1002,19 @@ async def get_ott_content():
             doc['_id'] = str(doc['_id'])
             ott_content_list.append(doc)
         
-        return ott_content_list
+        return JSONResponse(content=ott_content_list)
     
     except Exception as e:
         logger.error(f"Error fetching OTT content: {e}")
-        return {"error": "Failed to fetch content"}, 500
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Failed to fetch content"}
+        )
+
+@app.get("/")
+async def root():
+    """Health check endpoint"""
+    return {"status": "Bot is running", "message": "Telegram Bot API"}
 
 def main() -> None:
     """Starts the application using uvicorn."""
