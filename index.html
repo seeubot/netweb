@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OTT Content Hub</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0d1117;
+            color: #c9d1d9;
+        }
+        .card:hover, .card:focus {
+            transform: scale(1.05);
+            box-shadow: 0 10px 15px rgba(0, 0, 0, 0.5);
+            z-index: 10;
+        }
+        .player-container {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.95);
+            z-index: 50;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }
+        .video-player {
+            width: 90%;
+            max-height: 90vh;
+        }
+        .close-player {
+            position: absolute;
+            top: 2rem;
+            right: 2rem;
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+            border: none;
+            border-radius: 9999px;
+            width: 3rem;
+            height: 3rem;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 1.5rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .close-player:hover, .close-player:focus {
+            background: rgba(255, 255, 255, 0.4);
+            transform: rotate(90deg);
+        }
+        .mx-player-button:hover, .mx-player-button:focus {
+            background-color: #f7a400;
+        }
+        .web-player-button:hover, .web-player-button:focus {
+            background-color: #007bff;
+        }
+    </style>
+</head>
+<body class="p-6">
+
+    <h1 class="text-3xl sm:text-4xl font-bold text-center mb-10 text-white">OTT Content Hub</h1>
+
+    <!-- Loading message -->
+    <div id="loading-message" class="text-center text-lg text-gray-400">Loading content...</div>
+    <div id="error-message" class="hidden text-center text-lg text-red-500">
+        Failed to load content. Please try again later.
+    </div>
+
+    <!-- Player Container -->
+    <div id="playerContainer" class="player-container">
+        <button id="closePlayerBtn" class="close-player">✖</button>
+        <video id="videoPlayer" class="video-player" controls autoplay playsinline></video>
+    </div>
+
+    <!-- Movies Section -->
+    <div id="movies-section" class="hidden mb-12">
+        <h2 class="text-2xl font-bold mb-4 text-blue-400">Movies</h2>
+        <div id="movies-list" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-6">
+            <!-- Movie cards will be injected here by JS -->
+        </div>
+    </div>
+
+    <!-- Series Section -->
+    <div id="series-section" class="hidden mb-12">
+        <h2 class="text-2xl font-bold mb-4 text-purple-400">Series</h2>
+        <div id="series-list" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-6">
+            <!-- Series cards will be injected here by JS -->
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', async () => {
+            const moviesList = document.getElementById('movies-list');
+            const seriesList = document.getElementById('series-list');
+            const playerContainer = document.getElementById('playerContainer');
+            const videoPlayer = document.getElementById('videoPlayer');
+            const closePlayerBtn = document.getElementById('closePlayerBtn');
+            const loadingMessage = document.getElementById('loading-message');
+            const errorMessage = document.getElementById('error-message');
+            const moviesSection = document.getElementById('movies-section');
+            const seriesSection = document.getElementById('series-section');
+
+            // IMPORTANT: Replace this placeholder with your bot's actual public webhook URL
+            const BOT_API_URL = 'https://your-bot-name.koyeb.app';
+            const CONTENT_ENDPOINT = `${BOT_API_URL}/ott_content`;
+
+            async function fetchOttContent() {
+                try {
+                    const response = await fetch(CONTENT_ENDPOINT);
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    const data = await response.json();
+                    renderContent(data);
+                } catch (error) {
+                    console.error('Error fetching OTT content:', error);
+                    loadingMessage.classList.add('hidden');
+                    errorMessage.classList.remove('hidden');
+                }
+            }
+
+            function renderContent(ottContent) {
+                loadingMessage.classList.add('hidden');
+                
+                moviesList.innerHTML = '';
+                seriesList.innerHTML = '';
+
+                let hasMovies = false;
+                let hasSeries = false;
+
+                ottContent.forEach(item => {
+                    if (item.type === 'movie') {
+                        moviesList.appendChild(createMovieCard(item));
+                        hasMovies = true;
+                    } else if (item.type === 'series') {
+                        seriesList.appendChild(createSeriesCard(item));
+                        hasSeries = true;
+                    }
+                });
+                
+                if (hasMovies) moviesSection.classList.remove('hidden');
+                if (hasSeries) seriesSection.classList.remove('hidden');
+                
+                if (!hasMovies && !hasSeries) {
+                    errorMessage.textContent = "No content available. Please add some via the bot.";
+                    errorMessage.classList.remove('hidden');
+                }
+                
+                updateFocusableElements();
+            }
+
+            function createMovieCard(movie) {
+                const card = document.createElement('div');
+                card.className = 'card w-full bg-gray-800 rounded-xl shadow-xl h-64 flex flex-col items-center justify-center cursor-pointer transition-transform duration-200';
+                card.setAttribute('tabindex', '0'); // Make card focusable for TV remote
+                card.innerHTML = `
+                    <img src="${movie.thumbnail}" alt="${movie.name}" class="h-40 w-auto rounded-lg mt-4 mb-2 object-cover">
+                    <h3 class="text-sm font-bold text-center">${movie.name}</h3>
+                `;
+                card.onclick = () => showPlayOptions(movie.name, movie.streaming_url);
+                return card;
+            }
+
+            function createSeriesCard(series) {
+                const card = document.createElement('div');
+                card.className = 'card w-full bg-gray-800 rounded-xl shadow-xl h-64 flex flex-col items-center justify-center cursor-pointer transition-transform duration-200';
+                card.setAttribute('tabindex', '0');
+                card.innerHTML = `
+                    <img src="${series.thumbnail}" alt="${series.name}" class="h-40 w-auto rounded-lg mt-4 mb-2 object-cover">
+                    <h3 class="text-sm font-bold text-center">${series.name}</h3>
+                `;
+                card.onclick = () => showSeasonEpisodeSelector(series);
+                return card;
+            }
+
+            function showPlayOptions(title, url) {
+                if (!url) {
+                    alert('No streaming URL available for this content.');
+                    return;
+                }
+                const playerOptions = document.createElement('div');
+                playerOptions.className = 'fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50';
+                playerOptions.innerHTML = `
+                    <div class="bg-gray-800 p-8 rounded-xl shadow-2xl text-center">
+                        <h3 class="text-xl font-bold mb-4">Play "${title}"</h3>
+                        <div class="flex space-x-4">
+                            <button id="webPlayerBtn" class="web-player-button bg-blue-600 text-white px-6 py-3 rounded-lg font-bold transition-colors duration-200">
+                                Web Player
+                            </button>
+                            <a href="intent:${url}#Intent;package=com.mxtech.videoplayer.ad;S.title=${encodeURIComponent(title)};end" 
+                                class="mx-player-button bg-yellow-500 text-black px-6 py-3 rounded-lg font-bold transition-colors duration-200 flex items-center justify-center">
+                                MX Player
+                            </a>
+                        </div>
+                        <button id="closeOptionsBtn" class="mt-6 text-red-400">Cancel</button>
+                    </div>
+                `;
+                document.body.appendChild(playerOptions);
+
+                document.getElementById('webPlayerBtn').onclick = () => {
+                    playInWebPlayer(url);
+                    playerOptions.remove();
+                };
+                document.getElementById('closeOptionsBtn').onclick = () => playerOptions.remove();
+            }
+
+            function playInWebPlayer(url) {
+                videoPlayer.src = url;
+                playerContainer.style.display = 'flex';
+                videoPlayer.play();
+            }
+
+            function showSeasonEpisodeSelector(series) {
+                const selector = document.createElement('div');
+                selector.className = 'fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4';
+                selector.innerHTML = `
+                    <div class="bg-gray-800 p-8 rounded-xl shadow-2xl text-center w-full max-w-lg max-h-[90vh] overflow-y-auto">
+                        <h3 class="text-xl font-bold mb-6">${series.name}</h3>
+                        ${series.seasons.map(season => `
+                            <div class="mb-4">
+                                <h4 class="text-lg font-semibold text-left mb-2">${season.season_name}</h4>
+                                <div class="grid grid-cols-2 gap-2">
+                                    ${season.episodes.map(episode => `
+                                        <button class="bg-gray-700 text-white px-4 py-2 rounded-lg text-left truncate hover:bg-blue-600 transition-colors duration-200"
+                                                onclick="showPlayOptions('${episode.episode_name}', '${episode.streaming_url}')">
+                                            ${episode.episode_name}
+                                        </button>
+                                    `).join('')}
+                                </div>
+                            </div>
+                        `).join('')}
+                        <button id="closeSelectorBtn" class="mt-6 text-red-400">Close</button>
+                    </div>
+                `;
+                document.body.appendChild(selector);
+                document.getElementById('closeSelectorBtn').onclick = () => selector.remove();
+            }
+
+            closePlayerBtn.onclick = () => {
+                videoPlayer.pause();
+                videoPlayer.src = '';
+                playerContainer.style.display = 'none';
+            };
+
+            // Keyboard navigation for Android TV remote
+            let currentFocus = 0;
+            const focusableElements = [];
+
+            const updateFocusableElements = () => {
+                focusableElements.length = 0;
+                document.querySelectorAll('a[href], button, [tabindex="0"]').forEach(el => focusableElements.push(el));
+                if (focusableElements.length > 0) {
+                    focusableElements[0].focus();
+                }
+            };
+            
+            document.body.addEventListener('keydown', (e) => {
+                if (playerContainer.style.display === 'flex') {
+                    // Handle keyboard events for the video player
+                    if (e.key === 'Escape' || e.key === 'Backspace') {
+                        closePlayerBtn.click();
+                    }
+                    return;
+                }
+
+                if (e.key === 'ArrowRight') {
+                    currentFocus = (currentFocus + 1) % focusableElements.length;
+                } else if (e.key === 'ArrowLeft') {
+                    currentFocus = (currentFocus - 1 + focusableElements.length) % focusableElements.length;
+                } else if (e.key === 'Enter') {
+                    focusableElements[currentFocus].click();
+                }
+                
+                if (focusableElements.length > 0) {
+                    focusableElements[currentFocus].focus();
+                }
+            });
+
+            // Fetch and render content on page load
+            fetchOttContent();
+        });
+    </script>
+</body>
+</html>
+
